@@ -1,0 +1,22 @@
+#!/bin/bash
+#triangle de pascal
+echo "Entrez la dimension de votre triangle de Pascal"
+echo -n "Dimension="
+read n
+for ((i=0;i<$n;i++))
+do
+	for ((j=0;j<$n;j++))
+	do
+		if (($i==$j || $j==0))
+		then
+		       f[j]=1 #soratana ao anatin'ny case
+		       echo -n "1 "
+		elif [ $i -gt $j ]
+		then
+			f[j]=$((t[j-1]+t[j]))
+			echo -n "${f[j]} " 
+		fi
+	done
+	t=(${f[@]}) #$@ permet d'afficher tout le contenu d'un variable
+	echo " " #descendre à la ligne pour une nouvelle ligne après avoir fini une ligne
+done
