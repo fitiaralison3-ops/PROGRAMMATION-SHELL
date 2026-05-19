@@ -1,0 +1,24 @@
+#!/bin/bash
+#sauvegarde d'un PC vers un autre
+
+echo "Entrer le nom du recepteur:"
+read nom
+echo "Entrer l'adresse ip du recepteur:"
+read ip
+
+SRC=/home/fitia/Mianoka
+DST=/home/$nom
+
+test=$(ping -c 2 "$ip" | head -2 | tail -1 | cut -d' ' -f1)
+if [[ "$test" == '64' ]]; then
+        echo "Connexion réussie"
+        if [ -d "$SRC" ]; then
+                echo "Le repertoire source existe"
+                echo "Copie en cours"
+                scp -r $SRC $nom@$ip:$DST
+        else
+                echo "Le fichier source n'existe pas"
+        fi
+else
+        echo "Adresse ip non existant ou injoignable. Veuillez recommencer"
+fi
