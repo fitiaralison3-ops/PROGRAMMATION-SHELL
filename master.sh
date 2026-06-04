@@ -59,6 +59,12 @@ do
 		(
     			flock 200
     			echo "$IP:$user" >> "$tmpfile"
+
+			# flock : verrou de fichier
+			# Empêche plusieurs processus (lancés en arrière-plan avec &) d'écrire en même temps dans le même fichier donc évite les lignes corrompues na mifangaro
+			# 200 eto dia numéro de descripteur du fichier
+			# 200 est donc un numéro identifiant du fichier ouvert
+
 		) 200>"$tmpfile.lock"
         fi
 	) &
@@ -98,9 +104,11 @@ while IFS=":" read -r ip user ; do
 			#atao anaty variable d'environnement amzay tsy hita anaty ps aux ny mot de passe
 			#if sshpass -e "$mdp" ssh-copy-id -o StrictHostKeyChecking=no -i "${cle}" "$user@$ip"  ; then  #mila mot de passe donc tsy azo ampiana &
 				# -o StrictHostKeyChecking=no : évite la question "Are you sure?" de SSH
+
 				echo "$user:$ip" >> "$liste" # copiena any @ fichier user.txt izy avy eo satria ilaina ao @ surveillance 
 				echo "Clé envoyée à $user"
 				ok=$(( ok + 1 ))
+
 				echo "[$(date)] Clé envoyée à $user@$ip" >> "$LOG"
 				ssh -i "$key" "$user@$ip" \
     				"echo '$mdp' | sudo -S bash -c \
