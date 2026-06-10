@@ -1,98 +1,157 @@
 #!/bin/bash
-#Partie 2 du projet contrAll
 
+#partie 2 du projet contrAll
 #suspension lorsque les restrictions dépassent 3
-#format du log ou du fichier restriction.txt: $user@$ip:nombre d'infractions ou nombre des restrictions déjà appliquées
+#Format du fichier restriction.txt: user:ip:nombre de restrictions
 
-#il faut demander au master la durée de la suspension qu'il veut
-#Atao any amin'ny voalohany ny demande
-
-
-#Ny suspension atao eto zany dia:
-
-#passwd -l $user: Verrouille le mot de passe de l'utilisateur. Concrètement, ça préfixe le hash du mot de passe avec ! dans /etc/shadow, ce qui le rend invalide.
-# L'utilisateur ne peut plus s'authentifier par mot de passe — mais une connexion SSH par clé reste possible.
-
-#usermod --expiredate 1 $user: Expire le compte en fixant sa date d'expiration au 1er janvier 1970 (timestamp UNIX 1 = le passé absolu). 
-#Le compte est considéré comme expiré, ce qui bloque l'accès même par clé SSH. C'est le filet de sécurité qui comble la faille laissée par passwd -l.
-
-#pkill -STOP -u $user: Suspend tous les processus appartenant à $user en leur envoyant le signal SIGSTOP.
-#Les processus sont gelés en mémoire, en pause.
-
-#Donc la suspension est d' isoler immédiatement un utilisateur (le "slave") sans brutalité 
-#il ne peut plus se connecter ni agir, mais ses processus actifs sont simplement suspendus, pas détruits.
-#Les données en cours de traitement sont préservées
+#Il faut demandé au master la durée de la suspension qu'il veut au tout début du script
 
 seuil=3
 restrictions="$HOME/restriction.txt"
 
-while true; do
-    read -p "Entrez la durée de la suspension en minutes: " time
-    if [[ "$time" =~ ^[0-9]+$ ]]; then
-        break  # nombre valide → on sort de la boucle
-    else
-        echo "ERREUR: Entrez un nombre valide"
-    fi
-done
+suspendus="$HOME/suspendus.txt"
+> "$suspendus"
+#ouvrir le fichier et efface tout son contenu instantanément. Si le fichier n'existe pas encore, il le crée
 
-while IFS=":" read -r user_ip nb; do
-    user="${user_ip%@*}"
-    ip="${user_ip#*@}"
-	#$user@$ip :nb (nombre de restriction appliquées après avoir détecté les suspensions
-	if (($nb >= $seuil))
+#Cette partie est à écrire au tout début du script, avant ou après du scan du réseau
+while true
+do
+	echo "Entrez la durée de la suspension en minutes: "
+	read duree
+	if [[ "$duree" =~ ^[0-9]+$ ]]
 	then
-		ssh -i "$key" "root@$ip" "wall 'ALERTE : Votre compte sera suspendu dans 1 minute. Sauvegardez vos données '"
-		#asiana message d'alerte any @ ilay slave
-		sleep 60
+		#Vérifie si c'est un entier positif composé de chiffre entre 0 et 9
 
-		ssh -i "$key" "root@$ip" "passwd -l $user"
-		#le slave ne peut plus se connecter avec son mot de passe
-
-		ssh -i "$key" "root@$ip" "usermod --expiredate 1 $user"
-		#expire le compte: double sécurité avec le passwd -l
-
-		#ssh -i "$key" "root@$ip" "pkill -STOP -u $user"
-		#SIGSTOP à tous les processus du user;processus suspendus fa tsy tué donc pas de perte de données
-		#pkill -STOP no ampiasaina satria raha kill -19 izy dia mila PID nefa ilay PID bdb donc aleo atao pkill STOP au lieu de haka PID bdb
-
-		uid=$(ssh -i "$key" root@"$ip" "id -u $user")
-
-                ssh -i "$key" root@"$ip" "systemctl freeze user-$uid.slice"
-                #figer le slave: suspendre instantanément toutes ses actions sans le déconnecter
-
-		for i in 1 2 3 4 5 6; do
-   			ssh -i "$key" root@"$ip" "systemctl stop getty@tty$i"
-		done
-
-		
-		#ssh -i "$key" "root@$ip" "loginctl terminate-user $user"
-		# Exécute l'utilitaire systemd pour déconnecter de force l'utilisateur $user, fermer tous ses processus en cours et libérer ses ressources
-
-		echo "[$(date)] SUSPENDU $user@$ip" >> "$LOG"
-
-		 sleep $(($time * 60))
-
-		ssh -i "$key" "root@$ip" "passwd -u $user"
-		#déverouille inverse de passwd -l
-
-       		ssh -i "$key" "root@$ip" "usermod --expiredate '' $user"
-		#réactive le compte
-		
-       		#ssh -i "$key" "root@$ip" "pkill -CONT -u $user"
-		#SIGCONT: reprend où le processus était gelé
-
-		#ssh -i "$key" "root@$ip" "loginctl terminate-user $user"
-		
-			
-		ssh -i "$key" root@"$ip" "systemctl thaw user-$uid.slice"
-		
-		for i in 1 2 3 4 5 6; do
-    			ssh -i "$key" root@"$ip" "systemctl start getty@tty$i"
-		done
-
-        	echo "[$(date)] SUSPENSION LEVÉE $user@$ip" >> "$LOG"
+		break #nombre positif donc on sort pour continuer
+	else
+		echo "Entrez un entier positif"
 	fi
-done < "$restrictions"
+done
+#le reste est bien ici
 
-#Quand la suspension commence, le compteur dans restriction.txt doit redemarrer à 0
-#mbola atao rédaction ito
+#----------------TALBLEAU EN TEMPS REEL---------------
+
+while true
+do
+	clear
+	echo "================================================================"
+	echo "      			TABLEAU DES UTILISATEURS SUSPENDUS"
+	echo "================================================================"
+	printf "%-15s | %-15s | %-10s | %-10s | %-10s\n" "USER" "IP" "DÉBUT" "FIN" "RESTANT"
+	echo "----------------------------------------------------------------"
+
+	if [ -s "$suspendus" ]; then
+    		while IFS=":" read -r u i deb fni rest; do
+       			printf "%-15s | %-15s | %-10s | %-10s | %-10s\n" "$u" "$i" "$deb" "$fni" "$rest"
+    		done < "$suspendus"
+	else
+    	echo "          Aucune suspension active"
+	fi
+
+	echo "================================================================"
+
+	sleep 1
+done &
+
+tableau_pid=$!
+# tableau_pid : PID du processus tableau pour le tuer à la fin
+trap "kill $tableau_pid 2>/dev/null" EXIT
+
+# Boucle principale — vérifie toutes les 30 secondes
+while true; do
+    if [ -f "$restrictions" ]; then
+        cp "$restrictions" "$restrictions.tmp"
+        while IFS=":" read -r user ip nb; do
+            [ -z "$user" ] && continue
+            nb=$(echo "$nb" | tr -d '[:space:]\r')
+            # tr -d supprime les espaces et \r pour éviter les erreurs de comparaison	
+
+	     if (( nb >= seuil )); then
+                # Vérifier si alice est déjà suspendue
+                if grep -q "^$user:$ip:" "$suspendus" 2>/dev/null; then
+                    continue
+                    # Si déjà dans suspendus.txt → pas de double suspension
+                fi
+
+                sed -i "s|^$user:$ip:.*|$user:$ip:0|" "$restrictions"
+                echo "[$(date)] Compteur remis à 0 pour $user:$ip" >> "$LOG"
+
+		(
+		   # Vérifier que SSH répond
+		   if ! ssh -i "$key" -o ConnectTimeout=3 -o BatchMode=yes "root@$ip" "echo ok" 2>/dev/null; then
+    		   echo "[$(date)] SSH indisponible pour $user@$ip" >> "$LOG"
+    		  exit 1
+		  fi
+		   uid=$(ssh -i "$key" "root@$ip" "id -u $user")
+		   if [ -z "$uid" ]; then
+  			echo "[$(date)] ERREUR UID pour $user@$ip" >> "$LOG"
+    			exit 1
+		   fi
+
+		   ssh -i "$key" "root@$ip" "wall 'Activité suspecte détectée. Suspension immédiate' "
+		   #Envoyer le message d'alerte au slave concerné
+		   sleep 5
+
+		   ssh -i "$key" "root@$ip" "passwd -l $user" 2>/dev/null
+		   	#passwd -l modifie le fichier /etc/shadow en ajoutant ! devant le hash du mot de passe.Il verouille le mot de passe
+
+		   ssh -i "$key" "root@$ip" "usermod --expiredate 1 $user"
+		   	#usermod --expiredate 1 Fixe la date d'expiration du compte au 1er janvier 1970 (timestamp Unix 1 = le passé absolu). Le compte est considéré expiré par le système.
+
+		   ssh -i "$key" "root@$ip" "echo '$user' >> /etc/cron.deny && echo '$user' >> /etc/at.deny"
+		   	#echo '$user' >> /etc/cron.deny && echo '$user' >> /etc/at.deny: empêchent l'user de planifier des commandes qui s'exécuteraient pendant sa suspension
+
+		   ssh -i "$key" "root@$ip" "iptables -A OUTPUT -m owner --uid-owner $uid -j DROP 2>/dev/null"
+		   	#iptables -A OUTPUT -m owner --uid-owner $uid -j DROP: Bloque tout le trafic réseau sortant du user uniquement, sans affecter root ni le master.
+
+		   ssh -i "$key" root@"$ip" "systemctl freeze user-$uid.slice"
+		   	#Geler le système: suspendre instantanément toutes ses actions sans le déconnecter
+
+		   ssh -i "$key" root@"$ip" "for i in 1 2 3 4 5 6; do systemctl stop getty@tty\$i; done"
+		   	#Coupure des TTY et des sessions actives
+
+
+		    echo "[$(date)] SUSPENDU $user@$ip" >> "$LOG"
+		    
+			# Enregistrer dans suspendus.txt
+                    debut=$(date +"%H:%M:%S")
+                    fin=$(date -d "+$duree minutes" +"%H:%M:%S")
+                    ( flock 200
+                      echo "$user:$ip:$debut:$fin:${duree}m00s" >> "$suspendus"
+                    ) 200>"$suspendus.lock"
+
+                    # Countdown
+                    secondes=$(( duree * 60 ))
+                    while (( secondes > 0 )); do
+                        min_restant=$(( secondes / 60 ))
+                        sec_restant=$(( secondes % 60 ))
+                        ( flock 200
+                          sed -i "s/$user:$ip:.*/$user:$ip:$debut:$fin:${min_restant}m${sec_restant}s/" "$suspendus"
+                        ) 200>"$suspendus.lock"
+                        sleep 5
+                        ((secondes -= 5))
+                    done
+
+                    # Levée
+                    ssh -i "$key" "root@$ip" "passwd -u $user"
+                    ssh -i "$key" "root@$ip" "usermod --expiredate '' $user"
+                    ssh -i "$key" "root@$ip" "sed -i '/^$user$/d' /etc/cron.deny && sed -i '/^$user$/d' /etc/at.deny"
+                    ssh -i "$key" "root@$ip" "iptables -D OUTPUT -m owner --uid-owner $uid -j DROP 2>/dev/null"
+                    ssh -i "$key" "root@$ip" "systemctl thaw user-$uid.slice"
+                    ssh -i "$key" "root@$ip" "for i in 1 2 3 4 5 6; do systemctl start getty@tty\$i; done"
+
+                    ( flock 200
+                      sed -i "/$user:$ip/d" "$suspendus"
+                    ) 200>"$suspendus.lock"
+
+                    echo "[$(date)] SUSPENSION LEVEE $user:$ip" >> "$LOG"
+
+                ) &
+            fi
+        done < "$restrictions.tmp"
+        rm -f "$restrictions.tmp"
+    fi
+
+    sleep 30
+    # Vérifier toutes les 30 secondes
+done
