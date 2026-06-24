@@ -1,7 +1,5 @@
 #!/bin/bash
-# surveillance.sh 
-# Rôle : Surveiller les programmes interdits, compter les infractions, 
-#        et préparer les données pour restriction/suspension
+# ContrAll
 
 
 # ========================== VARIABLES GLOBALES ===============================
@@ -22,10 +20,30 @@ x=0
 suspendus="$HOME/suspendus.txt"
 
 
+
+#-----COULEUR-----
+noir='\033[0;30m'
+rouge='\033[0;31m'
+vert='\033[0;32m'
+jaune='\033[0;33m'
+bleu='\033[1;34m'
+violet='\033[0;35m'
+cyan='\033[0;36m'
+blanc='\033[0;37m'
+neutre='\033[0m'
+
+#----STYLE----
+gras='\033[1m'
+norm='\033[0m'
+
+
 # ========================== FONCTIONS DE SURVEILLANCE ========================
 
 configuration ()
 	{
+		> "$BLACKLIST_DISTANTE"
+		> "$CMD_BLACKLIST"
+		#mbola ampiana commande et terminaux
 		declare -A categorie
 		categorie["navigation"]="firefox google-chrome chromium brave-browser vivaldi-stable microsoft-edge opera torbrowser-launcher"
 		categorie["messagerie"]="telegram-desktop discord signal-desktop caprine whatsapp-for-linux element-desktop slack"
@@ -35,56 +53,78 @@ configuration ()
 		categorie["bureautique"]="libreoffice-writer libreoffice-calc gimp inkscape"
 		categorie["reseaux_sociaux"]="thunderbird evolution"
 
+		declare -A commande
+		commande["reseau"]="nmap nc netcat hydra wireshark tcpdump aircrack-ng"
+		commande["téléchargement"]="wget rsync curl scp"
+		commande["contournement"]="systemctl kill pkill"
+		#crontab sy at efa non autorisé 
+		commande["privileges"]="sudo su"
+		
+		TERMINAUX=(gnome-terminal xterm konsole xfce4-terminal lxterminal tilix terminator)
+			#gnome-terminalGNOME (Ubuntu, Fedora par défaut)
+			#xtermTerminal basique, présent presque partout
+			#konsoleKDE Plasmaxfce4-terminal
+			#XFCElxterminalLXDE (environnements légers)
+			#tilixTerminal avancé avec multiplexageterminatorTerminal avec split de fenêtres
+
 		#demander au master la durée de la surveillance
 		while true
 		do
- 			echo "Entrez la durée de la surveillance en minutes"
+ 			echo -e -n "${cyan}${gras}Entrez la durée de la surveillance en minutes ${norm}"
  			read temps
  			if  [[ "$temps" =~ ^[0-9]+$ ]]
  			then
- 				break
+ 				echo "[$(date '+%Y-%m-%d %H:%M:%S')] Durée de surveillance: $temp minutes" >> "$LOG"
+				break
  			else
         			echo "Entrez un entier positif"
         		fi
+			echo ""
     		done
     		
     		#demander au master le nombre de restrictions limites
     		while true
     		do
-    			echo "Entrez le nombre de restrictions acceptées avant suspension"
+    			echo -e -n "${cyan}${gras}Entrez le nombre de restrictions acceptées avant suspension ${norm}"
     			read seuil
  			if  [[ "$seuil" =~ ^[0-9]+$ ]]
  			then
+				echo "[$(date '+%Y-%m-%d %H:%M:%S')] Seuil: $seuil restrictions" >> "$LOG"
  				break
  			else
         			echo "Entrez un entier positif"
         		fi
+			echo ""
     		done
     		
     		#demander au master la durée de la suspension
  		while true
 		do
- 			echo "Entrez la durée de la suspension en minutes"
+ 			echo -e -n "${cyan}${gras}Entrez la durée de la suspension en minutes ${norm}"
  			read duree
  			if  [[ "$duree" =~ ^[0-9]+$ ]]
  			then
+				echo "[$(date '+%Y-%m-%d %H:%M:%S')] Durée de suspension: $duree minutes" >> "$LOG"
  				break
  			else
         			echo "Entrez un entier positif"
         		fi
+			echo ""
     		done   		
     		
     		#logiciels interdits
+		echo ""
 		for cat in "${!categorie[@]}"
 		do
-			echo "Voulez-vous interdire les logiciels de $cat? [oui/non]"
+			echo -e -n "${cyan}${gras}Voulez-vous interdire les logiciels de $cat?${norm} [oui/non] "
 			read conf
 
 			case "$conf" in
 				o|O|oui|OUI|y|Y|yes|YES)
+					echo "[$(date '+%Y-%m-%d %H:%M:%S')] Logiciel de $cat " >> "$LOG"
 					for app in ${categorie[$cat]}
 					do
-						echo "Voulez-vous interdire $app? [oui/non]"
+						echo -e -n "${rouge}${gras}Voulez-vous interdire $app?${norm} [oui/non] "
 						while true
 						do
 							read ans
@@ -116,9 +156,80 @@ configuration ()
 					;;
 			esac
 		done
+		
+		#Commandes interdites
+		echo ""
+		for com in "${!commande[@]}"
+		do
+			echo -e -n "${cyan}${gras}Voulez-vous interdire les commandes de $com?${norm} [oui/non] "
+			read conf
+
+			case "$conf" in
+				o|O|oui|OUI|y|Y|yes|YES)
+					for cmd in ${commande[$com]}
+					do
+						echo -e -n "${rouge}${gras}Voulez-vous interdire $cmd?${norm} [oui/non] "
+						while true
+						do
+							read ans
+
+                                                       	case "$ans" in
+                                	                        n|N|non|NON|no|NO)
+                	                                                break
+                        	                                        ;;
+                                                                o|O|oui|OUI|y|Y|yes|YES)
+                                                                        echo "$cmd" >> "$CMD_BLACKLIST"
+                                                                        echo "[$(date)] $cmd interdit" >> "$LOG"
+                                                                        break
+                                                                        ;;
+                                                                 *)
+                                                                        echo "Choix invalide. Reéssayer"
+                                                                        echo ""
+                                                                       	;;
+							esac
+						done
+					done
+					break
+					;;
+				n|N|non|NON|no|NO)
+					continue
+					;;
+
+				*)
+					echo "Choix invalide. Reéssayer"
+					;;
+			esac
+		done
+		
+		#Terminaux autorisés
+		echo ""
+		echo -e "${cyan}${gras}Choisissez le terminal autorisé ${norm}"
+		for i in "${!TERMINAUX[@]}"; do
+    			echo "[$i] ${TERMINAUX[$i]}"
+		done
+
+		read -p "Numéro du terminal autorisé : " choix
+		terminal_ok="${TERMINAUX[$choix]}"
+		echo "$terminal_ok" > "$TERMINAL_AUTORISE"
+		echo "[$(date)] Terminal autorisé : $terminal_ok" >> "$LOG"
+		
 	}
 
-preparation ( )
+	envoyer_configuration() 
+		{
+    			while IFS=":" read -r user ip; do
+        			[ -z "$user" ] && continue
+       		 		if scp -i "$key" "$BLACKLIST_DISTANTE" "$user@$ip:$BLACKLIST_DISTANTE" 2>/dev/null && \
+        			   scp -i "$key" "$CMD_BLACKLIST" "$user@$ip:$CMD_BLACKLIST" 2>/dev/null && \
+        			   scp -i "$key" "$TERMINAL_AUTORISE" "$user@$ip:$TERMINAL_AUTORISE" 2>/dev/null; then
+					echo "[$(date)] Fichier de configuration envoyé à $user@$ip " >> "$LOG"
+				else
+					echo "[$(date)] Erreur d'envoi du fichier de configuration à $user@$ip" >> "$LOG"
+				fi			
+    			done < "$LISTE"
+		}
+
+preparation( )
 	{
 		> "$LISTE"
 
@@ -356,7 +467,7 @@ mettre_a_jour_restriction() {
     
     # Chercher si l'utilisateur existe déjà dans restriction.txt
     # grep -w cherche le mot exact (user:ip)
-    if grep -q "$user:$ip" "$RESTRICTION_FILE" ; then
+    if grep -q "^$user:$ip" "$RESTRICTION_FILE" ; then
         # L'utilisateur existe déjà, il faut incrémenter son compteur
         # sed -i modifie le fichier en place
         # Cette commande complexe trouve la ligne et incrémente le nombre
@@ -376,32 +487,33 @@ afficher_bilan() {
     local machines_alert="$3"
     local machines_injoignable="$4"
     
-    echo -e "\n ============================================"
-    echo " BILAN DE SURVEILLANCE"
-    echo " ============================================"
+    echo -e "\n ${vert}=============================================${neutre}"
+    echo -e "${rouge}             BILAN DE SURVEILLANCE ${neutre}"
+    echo -e "${vert} =============================================${neutre}"
     echo "   Total machines scannées    : $total_machines"
     echo "   Machines conformes      : $machines_ok"
     echo "    Machines avec alertes  : $machines_alert"
     echo "   Machines injoignables   : $machines_injoignable"
-    echo " ============================================"
+    echo -e "${vert} =============================================${neutre}"
     echo " Logs       : $LOG"
     echo "  Alertes    : $FICHIER_ALERTES"
     echo " Restrictions: $RESTRICTION_FILE"
-    echo "============================================"
+    echo -e "${vert}=============================================${neutre}"
+    sleep 10
 }
 
-tableau ()
+tableau()
 	{
 		#----------------TALBLEAU EN TEMPS REEL---------------
 
 		while true
 		do
 			clear
-			echo "================================================================"
-			echo "      			TABLEAU DES UTILISATEURS SUSPENDUS"
-			echo "================================================================"
+			echo -e "${noir}================================================================${neutre}"
+			echo -e "${jaune}      			TABLEAU DES UTILISATEURS SUSPENDUS ${neutre}"
+			echo -e "${noir}================================================================${neutre}"
 			printf "%-15s | %-15s | %-10s | %-10s | %-10s\n" "USER" "IP" "DÉBUT" "FIN" "RESTANT"
-			echo "----------------------------------------------------------------"
+			echo -e "${noir}----------------------------------------------------------------${neutre}"
 
 			if [ -s "$suspendus" ]; then
     				while IFS=":" read -r u i deb fni rest; do
@@ -411,7 +523,7 @@ tableau ()
     				echo "          Aucune suspension active"
 			fi
 
-			echo "================================================================"
+			echo -e "${noir}================================================================${neutre}"
 
 			sleep 1
 		done
@@ -546,91 +658,123 @@ traiter_utilisateur()
 }
 
 
+#Vérification si l'user dépasse le seuil de suspension
+verification()
+	{
+		while true
+		do
+			if [ -f "$RESTRICTION_FILE" ]
+			then
+				cp "$RESTRICTION_FILE" "$RESTRICTION_FILE.tmp"
+				while IFS=":" read -r user ip nb; do
+					[ -z "$user" ] && continue
+					nb=$(echo "$nb" | tr -d '[:space:]\r')
+					if (( nb >= seuil ))
+					then
+						traiter_utilisateur "$user" "$ip"
+					fi
+				done < "$RESTRICTION_FILE.tmp"
+				rm -f "$RESTRICTION_FILE.tmp"
+			fi
+			sleep 30
+		done
+	}
 
-# ============================================================================
-# ========================== PROGRAMME PRINCIPAL ==============================
-# ============================================================================
 
-# Vérifier que user.txt existe (généré par master.sh)
+#============================================================================
+# ========================== PROGRAMME PRINCIPAL ============================
+# ===========================================================================
+
+echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] ${rouge}${gras}LANCEMENT DE ContrAll${norm}">"$LOG"
+echo "" >> "$LOG"
+
+configuration
+preparation
+
+#on doit d'abord vérifier si la liste des slaves existe bien après le scan
 if [ ! -f "$LISTE" ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERREUR: $LISTE introuvable. Lancez master.sh d'abord." >> "$LOG"
-    echo "ERREUR: Le fichier $LISTE n'existe pas. Exécutez d'abord master.sh"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERREUR: $LISTE introuvable." >> "$LOG"
+    echo "ERREUR: Le fichier $LISTE n'existe pas."
     exit 1
 fi
 
+envoyer_configuration
+>"$suspendus"
+trap 'rm -f "$suspendus.lock"' EXIT
+
+#Afficher le tableau en temps réel
+#tableau& 
+tableau_pid=$!
+trap "kill $tableau_pid 2>/dev/null" EXIT   
+
+#Vérification des seuil en arrière plan
+verification &
+
 while true 
 do
-	# Initialiser les fichiers
+	#initialiser les fichiers
 	initialiser_fichiers
 
-	# Compteurs 
-	TOTAL_MACHINES=0
-	MACHINES_OK=0
-	MACHINES_ALERT=0
-	MACHINES_INJOIGNABLE=0
-	TOTAL_INFRACTIONS=0
-
-	echo " Début de la surveillance..."
-	echo "[$(date '+%Y-%m-%d %H:%M:%S')] Début de la surveillance" >> "$LOG"
-
+	echo "DEBUT DE LA SURVEILLANCE"
+	echo  "[$(date '+%Y-%m-%d %H:%M:%S')] Début de la surveillance" >> "$LOG"
 	# Lire chaque ligne de user.txt (format: user:ip)
-	while IFS=: read -r user ip; do
-   	 # [ -z "$user" ] teste si la variable est vide
-    	 # || signifie OU, && signifie ET
-   	 # continue passe à la ligne suivante
-   		{ [ -z "$user" ] || [ -z "$ip" ]; } && continue
-    
-   		 TOTAL_MACHINES=$((TOTAL_MACHINES + 1))
-   		 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Vérification de $user@$ip..." >> "$LOG"
-   		 echo " Vérification de $user@$ip..."
-    
-    		# Tester la connexion SSH
-    		if ! tester_connexion_ssh "$user" "$ip"; then
-        		echo "[$(date '+%Y-%m-%d %H:%M:%S')] INJOIGNABLE: $user@$ip" >> "$LOG"
-        		echo "    Machine injoignable"
-        		MACHINES_INJOIGNABLE=$((MACHINES_INJOIGNABLE + 1))
-        		continue  # Passe à la machine suivante
-    		fi
-    
-    		# Compteur d'infractions pour cette machine
-    		infractions_machine=0
-    
-    		# Appeler les fonctions de surveillance
-    		infractions_app=$(surveiller_applications "$user" "$ip")
-    		infractions_machine=$((infractions_machine + infractions_app))
-    
-    		infractions_term=$(surveiller_terminaux "$user" "$ip")
-    		infractions_machine=$((infractions_machine + infractions_term))
-    
-    		infractions_cmd=$(surveiller_commandes "$user" "$ip")
-    		infractions_machine=$((infractions_machine + infractions_cmd))
-    
-    		# Traiter les résultats
-    		if [ "$infractions_machine" -gt 0 ]; then
-        		echo "     $infractions_machine infraction(s) détectée(s) !"
-        		MACHINES_ALERT=$((MACHINES_ALERT + 1))
-        		TOTAL_INFRACTIONS=$((TOTAL_INFRACTIONS + infractions_machine))
-        
-        		# Mettre à jour le fichier pour la suspension
-        		mettre_a_jour_restriction "$user" "$ip" "$infractions_machine"
-        
-        		# Vérifier si le seuil de suspension est atteint
-        		if [ "$infractions_machine" -ge "$seuil" ]; then
-            			echo "    SEUIL DE SUSPENSION ATTEINT ($seuil) !"
-            			echo "[$(date '+%Y-%m-%d %H:%M:%S')] SUSPENSION REQUISE: $user@$ip a $infractions_machine infractions" >> "$LOG"
-        		fi
-    		else
-        		echo "    Aucune infraction"
-        		MACHINES_OK=$((MACHINES_OK + 1))
-    		fi
-    
-	done < "$LISTE"
+       while IFS=: read -r user ip; do
+       # [ -z "$user" ] teste si la variable est vide
+       # || signifie OU, && signifie ET
+       # continue passe à la ligne suivante
+                 { [ -z "$user" ] || [ -z "$ip" ]; } && continue
 
-	# Afficher le bilan
-	afficher_bilan "$TOTAL_MACHINES" "$MACHINES_OK" "$MACHINES_ALERT" "$MACHINES_INJOIGNABLE"
+                  TOTAL_MACHINES=$((TOTAL_MACHINES + 1))
+                  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Vérification de $user@$ip..." >> "$LOG"
+                  echo " Vérification de $user@$ip..."
+                 
+                 # Tester la connexion SSH
+                 if ! tester_connexion_ssh "$user" "$ip"; then
+                         echo "[$(date '+%Y-%m-%d %H:%M:%S')] INJOIGNABLE: $user@$ip" >> "$LOG"
+                         echo "    Machine injoignable"
+                         MACHINES_INJOIGNABLE=$((MACHINES_INJOIGNABLE + 1))
+                         continue  # Passe à la machine suivante
+                 fi      
+ 
+                 # Compteur d'infractions pour cette machine
+                 infractions_machine=0
+ 
+                 # Appeler les fonctions de surveillance
+                 infractions_app=$(surveiller_applications "$user" "$ip")
+                 infractions_machine=$((infractions_machine + infractions_app))
+ 
+                 infractions_term=$(surveiller_terminaux "$user" "$ip")
+                 infractions_machine=$((infractions_machine + infractions_term))
+                                                        
+ 		infractions_cmd=$(surveiller_commandes "$user" "$ip")
+                infractions_machine=$((infractions_machine + infractions_cmd))
+ 
+                # Traiter les résultats
+                if [ "$infractions_machine" -gt 0 ]; then
+                         echo "     $infractions_machine infraction(s) détectée(s) !"
+                         MACHINES_ALERT=$((MACHINES_ALERT + 1))
+                         TOTAL_INFRACTIONS=$((TOTAL_INFRACTIONS + infractions_machine))
 
-	echo "[$(date '+%Y-%m-%d %H:%M:%S')] Fin de la surveillance. Total infractions: $TOTAL_INFRACTIONS" >> "$LOG"
+                        # Mettre à jour le fichier pour la suspension
+                        mettre_a_jour_restriction "$user" "$ip" "$infractions_machine"
 
-    	sleep 30
+                         # Vérifier si le seuil de suspension est atteint
+                         if [ "$infractions_machine" -ge "$seuil" ]; then
+                                 echo "    SEUIL DE SUSPENSION ATTEINT ($seuil) !"
+                                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] SUSPENSION REQUISE: $user@$ip a $infractions_machine infractions" >> "$LOG"
+                         fi
+                else
+                         echo "    Aucune infraction"
+                         MACHINES_OK=$((MACHINES_OK + 1))
+                 fi
+ 
+         done < "$LISTE"
+ 
+         # Afficher le bilan
+         afficher_bilan "$TOTAL_MACHINES" "$MACHINES_OK" "$MACHINES_ALERT" "$MACHINES_INJOIGNABLE"
+ 
+         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Fin de la surveillance. Total infractions: $TOTAL_INFRACTIONS" >> "$LOG"
+ 
+        sleep 30
+
 done
-
