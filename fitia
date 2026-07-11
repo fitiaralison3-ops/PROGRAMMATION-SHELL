@@ -1,0 +1,1144 @@
+#!/bin/bash
+
+set -uo pipefail
+#set -u Plante le script si on utilise une variable non définie
+#set -o plante le script si une commande dans un pipe échoue
+
+########################################################################
+#                      VARIABLES GLOBALES
+########################################################################
+
+nom=$(whoami)
+cle="$HOME/.ssh/id_contrall.pub"              # Clé publique SSH
+key="$HOME/.ssh/id_contrall"                  # Clé privée SSH
+LOG="$HOME/contrall.log"                      # Fichier de log principal
+LISTE="$HOME/user.txt"                        # Liste des clients (user:ip)
+FICHIER_ALERTES="$HOME/alertes_actives.txt"   # Alertes détectées
+RESTRICTION_FILE="$HOME/restriction.txt"      # Compteur d'infractions (user:ip:nb)
+
+BLACKLIST_LOCALE="$HOME/blacklist.txt"                 # Logiciels interdits
+CMD_BLACKLIST_LOCALE="$HOME/cmd_blacklist.txt"         # Commandes interdites
+TERMINAL_AUTORISE_LOCALE="$HOME/terminal_autorise.txt" # Terminaux autorisés
+
+MAX=50
+x=0
+suspendus="$HOME/suspendus.txt"
+COOLDOWN_FILE="$HOME/contrall_cooldown.txt"
+
+#Au cas où le master ne les définit pas
+seuil=3
+duree=10
+temps=5
+
+opt="-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o ServerAliveInterval=30"
+
+# Nettoyage automatique à la fermeture du script
+trap nettoyage EXIT INT TERM
+
+# Codes couleur pour l'affichage
+noir='\033[0;30m'
+rouge='\033[0;31m'
+vert='\033[0;32m'
+jaune='\033[0;33m'
+bleu='\033[1;34m'
+violet='\033[0;35m'
+cyan='\033[0;36m'
+blanc='\033[0;37m'
+neutre='\033[0m'
+
+gras='\033[1m'
+norm='\033[0m'
+
+#########################################################################################
+#                                        FONCTIONS                                       
+#########################################################################################
+
+#Fonction 1: log
+log()
+{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$1]: $2" >> "$LOG"
+}
+
+#Fonction 2: Fonction de déblocage 
+debloquer_urgence()
+{
+    local user="$1"
+    local ip="$2"
+    echo "Déblocage d'urgence pour $user@$ip ..."
+    
+    ssh -i "$key" $opt "root@$ip" "passwd -u $user" 2>/dev/null
+    ssh -i "$key" $opt "root@$ip" "usermod --expiredate '' $user" 2>/dev/null
+    ssh -i "$key" $opt "root@$ip" "sed -i '/^$user$/d' /etc/cron.deny 2>/dev/null; sed -i '/^$user$/d' /etc/at.deny 2>/dev/null" 2>/dev/null
+    ssh -i "$key" $opt "root@$ip" "iptables -D OUTPUT -m owner --uid-owner \$(id -u $user) -j DROP 2>/dev/null || true"
+    ssh -i "$key" $opt "root@$ip" "systemctl thaw user-\$(id -u $user).slice 2>/dev/null || true"
+    ssh -i "$key" $opt "root@$ip" "for i in 1 2 3 4 5 6; do systemctl start getty@tty\$i 2>/dev/null || true; done" 2>/dev/null
+    
+    echo "Déblocage terminé."
+}
+
+#Fonction 3:fonction de secours qui supprime les fichiers temporaires, tue les processus en arrière-plan, et débloque automatiquement tous les slaves quand le script s'arrête 
+nettoyage()
+{
+    	clear
+    	echo -e "${jaune}Nettoyage en cours...${neutre}"
+    
+   	rm -f "${tmpfile:-}" "${tmpfile:-}.lock" /tmp/tableau_propre 2>/dev/null || true
+    	kill "${verification_pid:-}" 2>/dev/null || true
+    	kill "${tableau_pid:-}" 2>/dev/null || true
+
+    	# Tentative de déblocage d'urgence de tous les slaves
+    	echo "Tentative de déblocage d'urgence des slaves..."
+    	if [ -f "$LISTE" ]; then
+        	while IFS=":" read -r user ip; do
+            		[ -z "$user" ] && continue
+            		debloquer_urgence "$user" "$ip"
+			nettoyer_alias "$user" "$ip"
+        	done < "$LISTE"
+    	fi
+
+    echo -e "${vert}Nettoyage terminé.${neutre}"
+}
+
+#Fonction 4: vérifie que tous les outils nécessaires (bash, dialog, ssh, scp, sshpass, nc, flock, awk, sed, hostname, date) 
+#sont installés, et bloque le lancement du script s'il en manque un
+dependance() 
+{
+    local deps=(bash dialog ssh scp sshpass nc flock awk sed hostname date)
+    local missing=()
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            missing+=("$dep")
+        fi
+    done
+    if [ "${#missing[@]}" -ne 0 ]; then
+        echo "Dépendances manquantes : ${missing[*]}" >&2
+        exit 1
+    fi
+}
+
+dependance
+
+dialog --title "ContrAll" --msgbox "Système de supervision de réseau\n\nMaster:$(whoami)" 12 55
+
+#Fonction 5: Initialiser les fichiers de surveillance
+#crée les fichiers de suivi (alertes, restrictions, cooldown) s'ils n'existent pas déjà, pour que le script puisse écrire dedans
+initialiser_fichiers() 
+{
+    [ ! -f "$FICHIER_ALERTES" ] && touch "$FICHIER_ALERTES"
+    [ ! -f "$RESTRICTION_FILE" ] && touch "$RESTRICTION_FILE"
+    [ ! -f "$COOLDOWN_FILE" ] && touch "$COOLDOWN_FILE"
+    log "INFO" "Initialisation des fichiers de surveillance"
+}
+
+
+#Fonction 6: vide tous les fichiers de suivi (alertes, restrictions, suspendus, cooldown) et
+#supprime les caches d'applications et d'historique pour repartir de zéro à chaque lancement
+nettoyer_surveillance() 
+{
+    > "$FICHIER_ALERTES"
+    > "$RESTRICTION_FILE"
+    > "$COOLDOWN_FILE"
+    rm -f "$HOME/.apps_"*
+    rm -f "$HOME/.last_line_"* "$HOME/.last_cmd_"*
+    log "INFO" "Fichiers de surveillance nettoyés"
+}
+
+#Fonction 7: enregistre un utilisateur dans le fichier cooldown avec une date d'expiration, 
+#pour empêcher qu'il soit re-suspendu immédiatement après une levée de suspension.
+marquer_cooldown() 
+{
+    local user="$1"
+    local ip="$2"
+    local expire_at=$(( $(date +%s) + (duree * 60) ))
+
+    [ -f "$COOLDOWN_FILE" ] || touch "$COOLDOWN_FILE"
+    (
+    	flock 200
+    	sed -i "/^$user:$ip:/d" "$COOLDOWN_FILE"
+    	echo "$user:$ip:$expire_at" >> "$COOLDOWN_FILE"
+    ) 200>"$COOLDOWN_FILE.lock"
+}
+
+#Fonction 8: vérifie si un utilisateur est encore en période de protection après une suspension : 
+#si oui, on l'ignore (retourne 0), si le délai est expiré, on le retire du fichier cooldown (retourne 1).
+verifier_cooldown() 
+{
+  #ignorer temporairement un utilisateur qui vient d'être suspendu
+    local user="$1"
+    local ip="$2"
+    local now=$(date +%s)
+
+    [ -f "$COOLDOWN_FILE" ] || return 1
+
+    local expire_at=$(awk -F: -v u="$user" -v i="$ip" '$1==u && $2==i {print $3}' "$COOLDOWN_FILE" | tail -n 1)
+
+    [ -n "$expire_at" ] || return 1
+
+    if [ "$expire_at" -gt "$now" ]; then
+        return 0
+    fi
+    (
+    	flock 200
+
+    	sed -i "/^$user:$ip:/d" "$COOLDOWN_FILE"
+    ) 200>"$COOLDOWN_FILE.lock"
+    return 1
+}
+
+#Fonction 9: teste si la connexion SSH vers un slave est toujours active
+verifier_ssh() 
+{
+    local ip="$1"
+    local user="$2"
+
+    if ssh -i "$key" $opt "root@$ip" "true" 2>/dev/null; then
+        return 0
+    else
+    	 log "AVERTISSEMENT" "SSH indisponible pour $user@$ip"
+        return 1
+    fi
+}
+
+#Fonction 10: Fonction qui  demande au master la durée de surveillance, le seuil d'infractions, 
+#la durée de suspension, et quelles catégories de logiciels, commandes et terminaux interdire, puis remplit les fichiers blacklist
+configuration()
+	{		
+			> "$BLACKLIST_LOCALE"
+			> "$CMD_BLACKLIST_LOCALE"
+			> "$TERMINAL_AUTORISE_LOCALE"
+			
+			declare -A categorie
+			categorie["navigation"]="firefox google-chrome chromium brave-browser vivaldi-stable microsoft-edge opera torbrowser-launcher"
+			categorie["messagerie"]="telegram-desktop discord signal-desktop caprine whatsapp-for-linux element-desktop slack"
+			categorie["jeux"]="steam lutris heroic minecraft-launcher itch wine"
+			categorie["multimedia"]="vlc mpv obs-studio audacity kdenlive spotify"
+			categorie["telechargement"]="transmission-gtk qbittorrent deluge filezilla"
+			categorie["bureautique"]="libreoffice-writer libreoffice-calc gimp inkscape"
+			categorie["reseaux_sociaux"]="thunderbird evolution"
+
+			declare -A commande
+			commande["reseau"]="nmap nc netcat hydra wireshark tcpdump aircrack-ng"
+			commande["telechargement"]="wget rsync curl scp"
+			commande["contournement"]="systemctl kill pkill"
+			commande["privileges"]="sudo su"
+		
+		temps=$(dialog --title "ContrAll — Configuration" \
+    			--inputbox "Durée de surveillance en minutes:" \
+    			8 55 "10" \
+    			3>&1 1>&2 2>&3)
+		log "INFO" "Durée de surveillance: $temps minutes"
+		# 8 55 c'est la taille de la boîte: 8-hauteur et 55-Lageur 
+		#3>&1   →  crée un flux temporaire 3, copie de stdout (1)
+		#1>&2   →  redirige stdout (1) vers stderr (2)
+		#2>&3   →  redirige stderr (2) vers le flux temporaire 3
+
+		seuil=$(dialog --title "ContrAll — Configuration" \
+			--inputbox "Nombre de restrictions acceptées avant suspension:" \
+			8 55 "3" \
+			3>&1 1>&2 2>&3)
+		log "INFO" "Seuil: $seuil restriction(s)"
+
+		duree=$(dialog --title "ContrAll — Configuration" \
+			--inputbox "Durée de la suspension en minutes:" \
+			8 55 "1" \
+                        3>&1 1>&2 2>&3)
+		log "INFO" "Durée d'une suspension: $duree minutes"
+
+		categories=$(dialog --title "ContrAll — Logiciels interdits" \
+    			--checklist "Sélectionnez les catégories à interdire :" \
+    			20 65 7 \
+    			"navigation"      "firefox, chrome, chromium..."  on  \
+    			"messagerie"      "discord, telegram, slack..."   off \
+    			"jeux"            "steam, lutris, wine..."        off \
+    			"multimedia"      "vlc, spotify, obs..."          off \
+    			"telechargement"  "qbittorrent, filezilla..."     off \
+    			"bureautique"     "gimp, inkscape..."             off \
+    			"reseaux_sociaux" "thunderbird, evolution..."     off \
+    			3>&1 1>&2 2>&3)
+		#ICI, si on est dans le tty, On utilise flêche de haut et de bas pour se déplacer et espace pour cocher
+	
+			for cat in $categories; do
+    				cat=$(echo "$cat" | tr -d '"')
+				[ -z "$cat" ] && continue
+    				[ -z "${categorie[$cat]:-}" ] && continue
+    				# Écrire tous les logiciels de cette catégorie dans la blacklist
+    				local IFS_SAVE="$IFS"; IFS=' '
+    				for app in ${categorie[$cat]}; do
+        				echo "$app" >> "$BLACKLIST_LOCALE"
+    				done
+    				IFS="$IFS_SAVE"
+    				log "INFO" "Catégorie interdite : $cat"
+			done
+
+		commandes=$(dialog --title "ContrAll — Commandes interdites" \
+    			--checklist "Sélectionnez les catégories de commandes à interdire :" \
+    			16 65 4 \
+    			"privileges"    "sudo, su"                      on  \
+    			"reseau"        "nmap, wireshark, tcpdump..."   off \
+    			"contournement" "systemctl, kill, pkill"        off \
+    			"telechargement" "wget, curl, scp"              off \
+    			3>&1 1>&2 2>&3)
+
+			for com in $commandes; do
+				com=$(echo "$com" | tr -d '"')
+				[ -z "$com" ] && continue
+				[ -z "${commande[$com]:-}" ] && continue
+    				local IFS_SAVE2="$IFS"; IFS=' '
+    				for cmd in ${commande[$com]}; do
+       	 				echo "$cmd" >> "$CMD_BLACKLIST_LOCALE"
+    				done
+    				IFS="$IFS_SAVE2"
+    				log "INFO" "Commandes interdites : $com"
+			done
+
+		terminal=$(dialog --title "ContrAll — Terminal autorisé" \
+    			--menu "Choisissez le terminal autorisé :" \
+    			18 60 6 \
+    			"gnome-terminal" "GNOME — Ubuntu par défaut" \
+   	 		"xterm"          "Terminal basique" \
+    			"konsole"        "KDE Plasma" \
+    			"xfce4-terminal" "XFCE" \
+    			"tilix"          "Terminal avancé" \
+    			"terminator"     "Terminal avec split" \
+    			3>&1 1>&2 2>&3)
+
+			echo "$terminal" > "$TERMINAL_AUTORISE_LOCALE"
+			log "INFO" "Terminal autorisé : $terminal"
+	}
+
+#Fonction 11: Injecter les alias pour bloquer les commandes interdites
+blocage()
+{
+    local user="$1"
+    local ip="$2"
+
+    if [ ! -s "$CMD_BLACKLIST_LOCALE" ]; then
+        log "AVERTISSEMENT" "cmd_blacklist vide — aucun alias injecté sur $user@$ip"
+        return
+    fi
+
+    local alias_block=""
+    alias_block+="# ContrAll-debut\n"
+    alias_block+="message() {\n"
+    alias_block+="    echo ''\n"
+    alias_block+="    echo '[ContrAll] Commande interdite !'\n"
+    alias_block+="    echo 'Une infraction a été enregistrée.'\n"
+    alias_block+="    echo ''\n"
+    alias_block+="    return 1\n"
+    alias_block+="}\n"
+
+    while IFS= read -r cmd; do
+        [ -z "$cmd" ] && continue
+        alias_block+="alias $cmd='message'\n"
+    done < "$CMD_BLACKLIST_LOCALE"
+
+    alias_block+="# ContrAll-fin\n"
+
+    ssh -i "$key" $opt "root@$ip" \
+        "sed -i '/# ContrAll-debut/,/# ContrAll-fin/d' /home/$user/.bashrc 2>/dev/null || true"
+
+    printf "%b" "$alias_block" | ssh -i "$key" $opt "root@$ip" \
+        "cat >> /home/$user/.bashrc"
+
+    log "INFO" "Alias de blocage injectés sur $user@$ip"
+}
+
+#Fonction 12: supprime les alias de blocage injectés dans le .bashrc du slave
+nettoyer_alias()
+{
+    local user="$1"
+    local ip="$2"
+    ssh -i "$key" $opt "root@$ip" "
+        sed -i '/# ContrAll-debut/,/# ContrAll-fin/d' /home/$user/.bashrc 2>/dev/null || true
+    " 2>/dev/null
+    log "INFO" "Alias nettoyés pour $user@$ip"
+}
+
+#Fonction 13: envoier les fichiers blacklist, cmd_blacklist et terminal_autorise vers chaque slave via SCP, puis affiche un bilan des réussites et échecs 
+envoyer_configuration() 
+	{
+		local ok=0
+		local echec=0
+		
+		dialog --infobox "Envoi de la configuration vers les clients..." 5 50
+		sleep 2
+	  	while IFS=":" read -r user ip; do
+        		[ -z "$user" ] && continue
+
+        		ssh -i "$key" $opt "$user@$ip" "mkdir -p /home/$user" >/dev/null 2>&1
+
+        		if scp -i "$key" "$BLACKLIST_LOCALE" "$user@$ip:/home/$user/blacklist.txt" &&
+           			scp -i "$key" $opt "$CMD_BLACKLIST_LOCALE" "$user@$ip:/home/$user/cmd_blacklist.txt" &&
+           			scp -i "$key" $opt "$TERMINAL_AUTORISE_LOCALE" "$user@$ip:/home/$user/terminal_autorise.txt"
+        		then
+            			log "INFO" "Configuration envoyée à $user@$ip"
+				blocage "$user" "$ip"
+            			((ok++))
+        		else
+            			log "ERREUR" "Erreur d'envoi à $user@$ip"
+            			((echec++))
+        		fi
+
+    	done < "$LISTE"
+
+    		dialog --msgbox "Configuration terminée.\nRéussites : $ok \nÉchecs    : $echec" \
+		10 45
+	}
+
+#Fonction 14: fonction qui scanne le réseau à la recherche des machines avec le port SSH ouvert, demande les identifiants pour chacune, 
+#envoie la clé SSH, configure sudo, active PermitRootLogin, force l'historique bash en temps réel,
+# puis affiche le bilan des machines configurées
+preparation() {
+    > "$LISTE"
+
+    if ! command -v sshpass >/dev/null 2>&1; then
+        dialog --msgbox "sshpass n'est pas installé." 7 45
+        exit 1
+    fi
+
+    [ ! -f "$LOG" ] && touch "$LOG"
+
+    if [ ! -f "$key" ]; then
+        ssh-keygen -t ed25519 -N "" -f "$key" >/dev/null
+    fi
+
+    ip_master=$(hostname -I | awk '{print $1}')
+    if [ -z "$ip_master" ]; then
+        dialog --title "Erreur" --msgbox "Impossible de déterminer l'adresse IP locale." 7 55
+        exit 1
+    fi
+    debut=$(echo "$ip_master" | cut -d'.' -f1-3)
+    tmpfile=$(mktemp)
+
+    for ((i=1; i<=254; i++)); do
+        ip="$debut.$i"
+        [[ "$ip" == "$ip_master" ]] && continue
+        (
+            if nc -z -w 3 "$ip" 22 >/dev/null 2>&1; then
+                if command -v host >/dev/null 2>&1; then
+                    hostname_full=$(host "$ip" 2>/dev/null | awk '/pointer/ {print $NF}' | sed 's/\.$//')
+                else
+                    hostname_full=$(hostname)
+                fi
+                user=$(echo "$hostname_full" | cut -d'-' -f1)
+                (
+                    flock 200
+                    echo "$user:$ip" >> "$tmpfile"
+                ) 200>"$tmpfile.lock"
+            fi
+        ) &
+
+        echo $((i*100/254))
+
+        x=$((x+1))
+        if [ "$x" -ge "$MAX" ]; then
+            wait
+            x=0
+        fi
+    done | dialog --title "ContrAll" --gauge "Scan du réseau en cours..." 8 60 0
+    wait
+
+    local ok=0
+    local echec=0
+
+    while IFS=":" read -r user ip; do
+        [ -z "$ip" ] && continue
+
+        if [ -z "$user" ]; then
+            user=$(dialog --inputbox \
+            "Nom d'utilisateur SSH pour $ip :" \
+            8 50 \
+            3>&1 1>&2 2>&3)
+        fi
+
+        # Si toujours vide, on passe à la machine suivante
+        if [ -z "$user" ]; then
+            log "AVERTISSEMENT" "Utilisateur non fourni pour $ip, saut de la machine"
+            continue
+        fi
+
+        dialog --yesno "Donner la clé SSH à\n$user@$ip ?" 8 45
+
+        if [ $? -eq 0 ]; then
+
+            mdp=$(dialog --insecure --passwordbox \
+            "Mot de passe de $user :" \
+            8 50 \
+            3>&1 1>&2 2>&3)
+
+            # --- 3 tentatives de mot de passe ---
+            tentative=1
+            succes=false
+            while [ $tentative -le 3 ]; do
+                if [ $tentative -gt 1 ]; then
+                    mdp=$(dialog --insecure --passwordbox \
+                        "Mot de passe incorrect.\nTentative $tentative/3 pour $user :" \
+                        10 50 \
+                        3>&1 1>&2 2>&3)
+                    # Si l'utilisateur annule, on sort
+                    [ -z "$mdp" ] && break
+                fi
+
+                if SSHPASS="$mdp" sshpass -e ssh-copy-id \
+                    -o StrictHostKeyChecking=no \
+                    -i "$cle" "$user@$ip" >/dev/null 2>&1
+                then
+                    succes=true
+                    break
+                fi
+                ((tentative++))
+            done
+
+            if $succes; then
+                echo "$user:$ip" >> "$LISTE"
+                ((ok++))
+                log "INFO" "Clé envoyée à $user@$ip"
+
+                ssh -i "$key" $opt "$user@$ip" \
+                "echo '$mdp' | sudo -S bash -c '
+                echo \"$user ALL=(ALL) NOPASSWD: /sbin/iptables,/usr/sbin/passwd,/usr/sbin/usermod,/bin/pkill\" > /etc/sudoers.d/contrall &&
+                chmod 440 /etc/sudoers.d/contrall'"
+
+                # Copier la clé vers root + configurer PermitRootLogin
+                ssh -i "$key" $opt "$user@$ip" \
+                    "echo '$mdp' | sudo -S bash -c \
+                    'mkdir -p /root/.ssh && \
+                    cat /home/$user/.ssh/authorized_keys >> /root/.ssh/authorized_keys && \
+                    chmod 600 /root/.ssh/authorized_keys && \
+                    chmod 700 /root/.ssh && \
+                    if grep -q \"^PermitRootLogin\" /etc/ssh/sshd_config; then \
+                        sed -i \"s/.*PermitRootLogin.*/PermitRootLogin prohibit-password/\" /etc/ssh/sshd_config; \
+                    else \
+                        echo \"PermitRootLogin prohibit-password\" >> /etc/ssh/sshd_config; \
+                    fi; \
+                    systemctl reload ssh'"
+                log "INFO" "Clé root configurée sur $user@$ip"
+
+                # Forcer l'écriture de bash_history en temps réel sur le slave
+                # PROMPT_COMMAND="history -a" : écrit bash_history à chaque prompt
+                # sans ça, bash_history n'est écrit qu'à la fermeture du terminal
+                ssh -i "$key" $opt "$user@$ip" \
+                    "grep -q 'PROMPT_COMMAND' ~/.bashrc || \
+                    echo 'PROMPT_COMMAND=\"history -a; \$PROMPT_COMMAND\"' >> ~/.bashrc"
+                log "INFO" "PROMPT_COMMAND configuré sur $user@$ip"
+
+                # Vider l'historique existant pour repartir de zéro
+                ssh -i "$key" $opt "$user@$ip" "> ~/.bash_history" 2>/dev/null
+            else
+                ((echec++))
+                log "ERREUR" "Échec de connexion à $user@$ip après 3 tentatives"
+                dialog --msgbox "Échec pour $user@$ip après 3 tentatives." 7 50
+            fi
+        else
+            log "ALERTE" "Envoi de clé refusé pour $user@$ip"
+        fi
+    done < "$tmpfile"
+
+    dialog --msgbox \
+    "Préparation terminée.
+
+	Machines configurées : $ok
+	Échecs               : $echec" \
+    	10 45
+}
+
+#Fonction 15: vérifie sur le slave si un logiciel interdit (listé dans blacklist.txt) est en cours d'exécution, 
+#le tue si c'est le cas, enregistre l'infraction dans les alertes, et utilise un cache pour ne pas recompter deux fois la même application
+surveiller_applications() {
+    local user="$1"
+    local ip="$2"
+    local blacklist="/home/$user/blacklist.txt"
+    local infractions_locales=0
+    local cache="$HOME/.apps_${user}_${ip}"
+
+    touch "$cache"
+
+    local apps_trouvees
+    apps_trouvees=$(ssh -i "$key" $opt "$user@$ip" "
+        [ -f $blacklist ] || exit 0
+        while IFS= read -r app; do
+            [ -z \"\$app\" ] && continue
+            if pgrep -x -u $user \"\$app\" >/dev/null 2>&1; then
+                pkill -x -u $user \"\$app\" 2>/dev/null || true
+                echo \"\$app\"
+            fi
+        done < $blacklist
+    " 2>/dev/null)
+
+    while IFS= read -r app; do
+        [ -z "$app" ] && continue
+        if ! grep -qx "$app" "$cache"; then
+            echo "$app" >> "$cache"
+            infractions_locales=$((infractions_locales + 1))
+            log "ALERTE" "APP INTERDITE: $user@$ip a lancé $app"
+            echo "$ip|$user|APP:$app|$(date '+%F %T')" >> "$FICHIER_ALERTES"
+        fi
+    done <<< "$apps_trouvees"
+
+    # Nettoyer le cache pour les apps qui ne tournent plus
+    if [ -s "$cache" ]; then
+        while IFS= read -r app_cache; do
+            if ! echo "$apps_trouvees" | grep -qx "$app_cache"; then
+                sed -i "/^$app_cache$/d" "$cache"
+            fi
+        done < "$cache"
+    fi
+
+    echo "$infractions_locales"
+}
+
+#Fonction 16:  vérifie que l'utilisateur du slave utilise uniquement le terminal autorisé, tue tout terminal non conforme, et enregistre l'infraction dans les alertes
+surveiller_terminaux()
+{
+    local user="$1"
+    local ip="$2"
+    local terminal_file="/home/$user/terminal_autorise.txt"
+    local infractions_locales=0
+
+    # Un seul SSH — lit le terminal autorisé ET détecte les non autorisés
+    local termes_interdits
+    termes_interdits=$(ssh -i "$key" $opt "root@$ip" "
+        [ -f $terminal_file ] || exit 0
+        terminal_ok=\$(cat $terminal_file | tr -d '\\r\\n')
+        for term in gnome-terminal xterm konsole xfce4-terminal lxterminal tilix terminator; do
+            if [ \"\$term\" != \"\$terminal_ok\" ]; then
+                if pgrep -x -u $user \"\$term\" >/dev/null 2>&1; then
+                    pkill -x -u $user \"\$term\" 2>/dev/null || true
+                    echo \"\$term\"
+                fi
+            fi
+        done
+    " 2>/dev/null)
+
+    # Traiter localement
+    while IFS= read -r term; do
+        [ -z "$term" ] && continue
+        infractions_locales=$((infractions_locales + 1))
+        log "ALERTE" "TERMINAL INTERDIT: $user@$ip utilise $term"
+        echo "$ip|$user|TERM:$term|$(date '+%F %T')" >> "$FICHIER_ALERTES"
+    done <<< "$termes_interdits"
+
+    echo "$infractions_locales"
+}
+
+#Fonction 17: lit les nouvelles lignes de l'historique bash du slave depuis la dernière vérification, 
+#les compare à la liste noire de commandes, et enregistre toute correspondance comme infraction dans les alertes
+surveiller_commandes() {
+    local user="$1"
+    local ip="$2"
+    local infractions_locales=0
+    local cache_line="$HOME/.last_line_${user}_${ip}"
+    local cache_cmd="$HOME/.last_cmd_${user}_${ip}"
+
+    local last_processed=0
+    [ -f "$cache_line" ] && last_processed=$(cat "$cache_line" | tr -d '[:space:]')
+
+    local next_line=$(( last_processed + 1 ))
+
+    # 1 seul SSH
+    local result
+    result=$(ssh -i "$key" $opt "$user@$ip" "
+        total=\$(wc -l < ~/.bash_history 2>/dev/null || echo 0)
+        echo \"TOTAL:\$total\"
+        if (( \$total >= $next_line )); then
+            sed -n '${next_line},\${total}p' ~/.bash_history 2>/dev/null
+        else
+            # Fallback : si pas de nouvelles lignes, lire quand même tail -1
+            tail -1 ~/.bash_history 2>/dev/null
+        fi
+    " 2>/dev/null)
+
+    [ -z "$result" ] && { echo 0; return; }
+
+    local total_lines
+    total_lines=$(echo "$result" | grep "^TOTAL:" | cut -d: -f2 | tr -d '[:space:]')
+    local new_cmds
+    new_cmds=$(echo "$result" | grep -v "^TOTAL:")
+
+    [ -z "$total_lines" ] && { echo 0; return; }
+
+    if (( total_lines < last_processed )); then
+        echo 0 > "$cache_line"
+    else
+        echo "$total_lines" > "$cache_line"
+    fi
+
+    [ -f "$CMD_BLACKLIST_LOCALE" ] || { echo 0; return; }
+
+    # Cache anti-doublon pour tail -1
+    local last_cmd=""
+    [ -f "$cache_cmd" ] && last_cmd=$(cat "$cache_cmd")
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+
+        # Si c'est du fallback tail -1 — vérifier le cache anti-doublon
+        if (( total_lines <= last_processed )); then
+            [ "$line" = "$last_cmd" ] && continue
+            echo "$line" > "$cache_cmd"
+        fi
+
+        while IFS= read -r cmd_interdite; do
+            [ -z "$cmd_interdite" ] && continue
+            if echo "$line" | grep -Fwq "$cmd_interdite"; then
+                infractions_locales=$((infractions_locales + 1))
+                log "ALERTE" "COMMANDE INTERDITE: $user@$ip a tapé: $line"
+                echo "$ip|$user|CMD:$cmd_interdite|$(date '+%F %T')" >> "$FICHIER_ALERTES"
+                break
+            fi
+        done < "$CMD_BLACKLIST_LOCALE"
+    done <<< "$new_cmds"
+
+    echo "$infractions_locales"
+}
+
+#Fonction 18:  incrémente le compteur d'infractions d'un utilisateur dans le fichier restriction.txt, 
+#ou crée une nouvelle entrée si c'est sa première infraction, en utilisant un verrou pour éviter les conflits d'écriture
+mettre_a_jour_restriction() 
+{
+    local user="$1"
+    local ip="$2"
+    local nouvelles_infractions="$3"
+
+    (
+        flock 200
+        if grep -q "^$user:$ip:" "$RESTRICTION_FILE"; then
+            ancien=$(grep "^$user:$ip:" "$RESTRICTION_FILE" | cut -d':' -f3 | tr -d '[:space:]\r')
+            nouveau=$((ancien + nouvelles_infractions))
+            sed -i "s|^$user:$ip:.*|$user:$ip:$nouveau|" "$RESTRICTION_FILE"
+        else
+            echo "$user:$ip:$nouvelles_infractions" >> "$RESTRICTION_FILE"
+        fi
+    ) 200>"$RESTRICTION_FILE.lock"
+}
+
+#Fonction 19: 
+afficher_bilan() 
+{
+    local total_machines="$1"
+    local machines_ok="$2"
+    local machines_alert="$3"
+    local machines_injoignable="$4"
+
+    echo -e "\n ${vert}============================================= ${neutre}"
+    echo -e "${rouge}             BILAN DE SURVEILLANCE ${neutre}"
+    echo -e "${vert} ============================================= ${neutre}"
+    echo "   Total machines scannées    : $total_machines"
+    echo "   Machines conformes         : $machines_ok"
+    echo "   Machines avec alertes      : $machines_alert"
+    echo "   Machines injoignables      : $machines_injoignable"
+    echo -e "${vert} ============================================= ${neutre}"
+    echo " Logs        : $LOG"
+    echo " Alertes     : $FICHIER_ALERTES"
+    echo " Restrictions: $RESTRICTION_FILE"
+    echo -e "${vert}============================================= ${neutre}"
+    sleep 10
+}
+
+#Fonction 20: Affiche en temps réel et en voucle la liste des slaves suspendus
+tableau() {
+    while true; do
+        clear
+        echo -e "${violet}================================================================${neutre}"
+        echo -e "${jaune}            TABLEAU DES UTILISATEURS SUSPENDUS ${neutre}"
+        echo -e "${violet}================================================================${neutre}"
+        printf "%-15s | %-15s | %-10s | %-10s | %-10s\n" "USER" "IP" "DÉBUT" "FIN" "RESTANT"
+        echo -e "${violet}----------------------------------------------------------------${neutre}"
+
+        if [ -s "$suspendus" ]; then
+            while IFS=":" read -r u i deb fni rest; do
+                printf "%-15s | %-15s | %-10s | %-10s | %-10s\n" "$u" "$i" "$deb" "$fni" "$rest"
+            done < "$suspendus"
+        else
+            echo "          Aucune suspension active"
+        fi
+
+        echo -e "${violet}================================================================${neutre}"
+        sleep 1
+    done
+}
+
+#Fonction 21: applique les 6 niveaux de sanction : notification, verrouillage du mot de passe, expiration du compte, blocage cron/at, 
+#coupure réseau via iptables, gel des processus, arrêt des TTY, puis enregistre la suspension avec l'heure de début et de fin.
+suspendre() 
+{
+    local user="$1"
+    local ip="$2"
+    local uid="$3"
+
+    if ! ssh -i "$key" $opt "root@$ip" "
+	    wall 'ContrAll : Activité suspecte. SUSPENSION IMMÉDIATE !' 2>/dev/null || true
+            sleep 3
+
+            passwd -l $user || exit 1
+
+            usermod --expiredate 1 $user || exit 1
+
+            echo '$user' >> /etc/cron.deny
+	    echo '$user' >> /etc/at.deny
+
+    	    iptables -A OUTPUT -m owner --uid-owner $uid -j DROP 2>/dev/null || true
+    	#iptables -A OUTPUT -m owner --uid-owner $uid -j DROP: Bloque tout le trafic réseau sortant du user uniquement, sans affecter root ni le master.
+    
+	    systemctl freeze user-$uid.slice 2>/dev/null || true 
+            for i in 1 2 3 4 5 6
+	    do 
+		    systemctl stop getty@tty\$i
+	    	    2>/dev/null || true 
+	    done" 2>/dev/null
+    then
+	    log "ERREUR" "Échec de la suspension pour $user@$ip"
+            return 1
+    fi
+
+    	log "ALERTE" "SUSPENDU $user@$ip"
+
+    	local debut=$(date +"%H:%M:%S")
+    	local fin=$(date -d "+$duree minutes" +"%H:%M:%S")
+
+    	(
+        	flock 200
+        	sed -i "s|^$user:$ip:.*|$user:$ip:$debut:$fin:${duree}m00s|" "$suspendus"
+    	) 200>"$suspendus.lock"
+
+    	return 0
+}
+
+#Fonction 22: décrémente le temps restant de suspension toutes les 5 secondes et met à jour le fichier suspendus.txt 
+#pour que le tableau affiche le compte à rebours en temps réel
+countdown() 
+{
+    local user="$1"
+    local ip="$2"
+    local debut="$3"
+    local fin="$4"
+    local secondes=$((duree * 60))
+
+    while ((secondes > 0)); do
+	    if ! grep -q "^$user:$ip:" "$suspendus" 2>/dev/null; then
+		    return 0
+	    fi
+        local min_restant=$((secondes / 60))
+        local sec_restant=$((secondes % 60))
+
+        (
+            flock 200
+            sed -i "s|^$user:$ip:.*|$user:$ip:$debut:$fin:${min_restant}m${sec_restant}s|" "$suspendus"
+        ) 200>"$suspendus.lock"
+
+        sleep 5
+        if ((secondes > 5)); then
+            secondes=$((secondes - 5))
+        else
+            secondes=0
+        fi
+    done
+}
+
+#Fonction 23: annule toutes les sanctions : réactive le mot de passe et le compte, retire l'utilisateur de cron.deny et at.deny, 
+#supprime la règle iptables, dégèle les processus, réactive les TTY, nettoie les caches, et retire l'utilisateur de la liste des suspendus.
+lever_suspension() 
+{
+    local user="$1"
+    local ip="$2"
+    local uid="$3"
+
+    ssh -i "$key" $opt "root@$ip" "passwd -u $user" >/dev/null 2>&1 || log "ERREUR" "Échec de la réactivation du mot de passe pour $user@$ip"
+    ssh -i "$key" $opt "root@$ip" "usermod --expiredate \"\" $user" >/dev/null 2>&1 || log "ERREUR" "Échec de la réactivation du compte pour $user@$ip"
+    ssh -i "$key" $opt "root@$ip" "sed -i \"/^$user$/d\" /etc/cron.deny" >/dev/null 2>&1 || log "ERREUR" "Échec de la suppression des restrictions cron/at pour $user@$ip"
+    ssh -i "$key" $opt "root@$ip" "sed -i \"/^$user$/d\" /etc/at.deny" >/dev/null 2>&1 || log "ERREUR" "Échec de la suppression des restrictions cron/at pour $user@$ip"
+    ssh -i "$key" $opt "root@$ip" "iptables -D OUTPUT -m owner --uid-owner $uid -j DROP" >/dev/null 2>&1 || true
+    ssh -i "$key" $opt "root@$ip" "systemctl thaw user-$uid.slice" >/dev/null 2>&1 || true
+    ssh -i "$key" $opt "root@$ip" "for i in 1 2 3 4 5 6; do systemctl start getty@tty\$i; done" >/dev/null 2>&1 || true
+
+    (
+        flock 200
+        sed -i "/^$user:$ip:/d" "$suspendus"
+    ) 200>"$suspendus.lock"
+
+    rm -f "$HOME/.apps_${user}_${ip}" "$HOME/.last_line_${user}_${ip}" "$HOME/.last_cmd_${user}_${ip}"
+    log "INFO" "SUSPENSION LEVEE $user:$ip"
+}
+
+#Fonction 24: gère tout le cycle de sanction : vérifie que l'utilisateur n'est pas déjà suspendu, le marque "en cours", 
+#applique la suspension, lance le compte à rebours, lève automatiquement la suspension à la fin, puis remet son compteur d'infractions à zéro.
+traiter_utilisateur() 
+{
+    local user="$1"
+    local ip="$2"
+
+    # Vérification et réservation HORS du sous-shell principal
+    ( flock 200
+      if grep -q "^$user:$ip:" "$suspendus"; then
+          exit 0
+      fi
+      echo "$user:$ip:EN_COURS:EN_COURS:EN_COURS" >> "$suspendus"
+    ) 200>"$suspendus.lock"
+
+    # Vérifier si la réservation a réussi
+    if ! grep -q "^$user:$ip:EN_COURS" "$suspendus" 2>/dev/null; then
+        return  # quelqu'un d'autre a déjà réservé
+    fi
+
+    # Maintenant lancer le cycle en arrière-plan
+    (
+        uid=$(ssh -i "$key" $opt "root@$ip" "id -u $user" 2>/dev/null)
+        if [ -z "$uid" ]; then
+            log "AVERTISSEMENT" "Impossible d'obtenir l'uid pour $user@$ip"
+            sed -i "/^$user:$ip:EN_COURS/d" "$suspendus" 2>/dev/null
+            exit 1
+        fi
+
+        if suspendre "$user" "$ip" "$uid"; then
+            marquer_cooldown "$user" "$ip"
+            if grep -q "^$user:$ip:" "$RESTRICTION_FILE"; then
+                sed -i "s|^$user:$ip:.*|$user:$ip:0|" "$RESTRICTION_FILE"
+            fi
+            log "INFO" "Compteur remis à 0 pour $user:$ip"
+
+            debut=$(date +"%H:%M:%S")
+            fin=$(date -d "+$duree minutes" +"%H:%M:%S")
+
+            countdown "$user" "$ip" "$debut" "$fin"
+            lever_suspension "$user" "$ip" "$uid"
+        else
+            sed -i "/^$user:$ip:EN_COURS/d" "$suspendus"
+            log "ERREUR" "Échec suspension $user@$ip — EN_COURS retiré"
+        fi
+    ) &
+}
+
+#Fonction 25:  parcourt chaque slave connecté, vérifie les applications, terminaux et commandes interdits, cumule les infractions, 
+#met à jour le compteur, et avertit l'utilisateur à chaque infraction détectée
+surveiller_clients()
+{
+    while IFS=: read -r user ip; do
+        [ -z "$user" ] && continue
+        if ! verifier_ssh "$ip" "$user"; then
+            continue
+        fi
+        if grep -q "^$user:$ip:" "$suspendus" 2>/dev/null; then
+            continue
+        fi
+
+        local infractions=0
+
+        # Surveiller les applications interdites
+        apps_infra=$(surveiller_applications "$user" "$ip" 2>/dev/null || echo 0)
+        infractions=$((infractions + apps_infra))
+
+        # Surveiller les terminaux non autorisés
+        term_infra=$(surveiller_terminaux "$user" "$ip" 2>/dev/null || echo 0)
+        infractions=$((infractions + term_infra))
+
+        # Surveiller les commandes interdites
+        cmd_infra=$(surveiller_commandes "$user" "$ip" 2>/dev/null || echo 0)
+        infractions=$((infractions + cmd_infra))
+
+        # === CONSÉQUENCE IMMÉDIATE À CHAQUE INFRACTION ===
+        if [ "$infractions" -gt 0 ]; then
+            mettre_a_jour_restriction "$user" "$ip" "$infractions"
+            
+            # Message visible sur la machine du client
+            ssh -i "$key" $opt "$user@$ip" "wall 'INFRACTION DÉTECTÉE !\nVous avez violé les règles du système ContrAll.\nContinuez et vous serez suspendu !'" 2>/dev/null || true
+            
+            log "INFO" "INFRACTION pour $user@$ip (+$infractions)"
+        fi
+    done < "$LISTE"
+}
+
+#Fonction 26: la boucle principale de surveillance : elle parcourt tous les clients, vérifie les infractions, 
+#et si le seuil est atteint, déclenche la suspension automatique après avoir vérifié que l'utilisateur n'est pas en période de cooldown.
+#Elle tourne pendant la durée choisie par le master
+verification() 
+{
+	    local fin=$(( $(date +%s) + temps * 60 ))
+    	    while (( $(date +%s) < fin )); do
+        	# Collecter les infractions depuis tous les clients
+        	surveiller_clients
+
+        	local tmp_entries
+        	tmp_entries=$(mktemp)
+
+        	(
+            		flock 200
+            		while IFS=: read -r user ip nb; do
+                		[ -z "$user" ] && continue
+                		nb=$(echo "$nb" | tr -d '[:space:]')
+
+                		if (( nb >= seuil )); then
+                    			echo "$user:$ip" >> "$tmp_entries"
+				fi
+          	   	done < "$RESTRICTION_FILE"
+        	) 200>"$RESTRICTION_FILE.lock"
+
+        	while IFS=: read -r user ip; do
+            		[ -z "$user" ] && continue
+            		if verifier_cooldown "$user" "$ip"; then
+                		continue
+            		fi
+            		traiter_utilisateur "$user" "$ip"
+        	done < "$tmp_entries"
+
+        	rm -f "$tmp_entries"
+        	sleep 2
+    	done
+}
+
+#Fonction 27: résumé de la session avec le nombre total de machines, d'alertes et de suspendus
+afficher_bilan_formate() 
+{
+    # On récupère les infos depuis les fichiers ou on fait un résumé simple
+    echo "--- RAPPORT DE SESSION ---"
+    echo "Total machines : $(wc -l < "$LISTE" 2>/dev/null || echo 0)"
+    echo "Alertes totales : $(wc -l < "$FICHIER_ALERTES" 2>/dev/null || echo 0)"
+    echo "Suspendus : $( [ -s "$suspendus" ] && wc -l < "$suspendus" 2>/dev/null || echo 0 )"
+    echo "--------------------------"
+    echo "Logs : $(tail -n 1 "$LOG" 2>/dev/null || echo 'aucun log')"
+}
+
+#Fonction 28: permet au master de lever manuellement une suspension en cours : 
+#elle affiche la liste des utilisateurs suspendus, demande confirmation, puis appelle lever_suspension()
+#pour tout réactiver immédiatement sans attendre la fin du compte à rebours
+grace()
+	{
+		if [ ! -s "$suspendus" ]; then
+			dialog --msgbox "Aucune suspension active en cours" 7 40
+			return
+		fi
+
+		local args=()
+		while IFS=":" read -r u i deb fin rest; do
+			[ "$deb" = "EN_COURS" ] && continue
+			args+=("$u@$i" "Depuis $deb - Reste: $rest")
+		done < "$suspendus"
+		
+		        # Si aucune suspension active (toutes EN_COURS), on quitte
+        if [ "${#args[@]}" -eq 0 ]; then
+            dialog --msgbox "Suspension en cours d'initialisation.\nRéessayez dans quelques secondes." 7 55
+            return
+        fi
+
+		local choix
+		choix=$(dialog --clear --title "Lever une suspension" \
+			--menu "Choisissez un utilisateur à libérer :" 15 60 5 \
+			"${args[@]}" \
+			3>&1 1>&2 2>&3)
+
+		[ -z "$choix" ] && return
+
+		local user=$(echo "$choix" | cut -d'@' -f1)
+		local ip=$(echo "$choix" | cut -d'@' -f2)
+
+		dialog --yesno "Libérer $user@$ip maintenant ?" 7 40
+		[ $? -ne 0 ] && return
+
+		local uid=$(ssh -i "$key" $opt "root@$ip" "id -u $user" 2>/dev/null)
+		if [ -n "$uid" ]; then
+			lever_suspension "$user" "$ip" "$uid"
+			dialog --msgbox "$user@$ip a été libéré." 7 40
+			log "INFO" "Levée manuelle de la suspension de $user@$ip réussi"
+		else
+			dialog --msgbox "Impossible de contacter $ip." 7 40
+			log "ALERTE" "Levée manuelle de la suspension de $user@$ip échoué"
+		fi
+	}
+
+#Fonction 29: tableau de bord interactif qui permet de voir le tableau des suspensions en temps réel, 
+#consulter les logs, afficher le bilan global, lever une suspension manuellement ou quitter le programme, tant que la surveillance est active
+menu_gestion() 
+{
+    while true; do
+        # On vérifie si la surveillance tourne toujours
+        if [ -z "${verification_pid:-}" ] || ! kill -0 "$verification_pid" 2>/dev/null; then
+            dialog --title "Info" --msgbox "La durée de surveillance est écoulée." 7 40
+            return 1 # On quitte la fonction si le processus est mort
+        fi
+
+        choix=$(dialog --clear --title "ContrAll - Pilotage" \
+            --menu "Sélectionnez une vue (Processus actif: $verification_pid) :" 15 50 5 \
+            "1" "Tableau des suspensions (Temps réel)" \
+            "2" "Consulter les derniers Logs" \
+            "3" "Afficher le bilan global" \
+	    "4" "Lever une suspension manuellement" \
+            "5" "Quitter ContrAll" 3>&1 1>&2 2>&3)
+
+        case $choix in
+                1) 
+                # Sortir proprement de dialog avant d'afficher le tableau
+                clear
+                tput reset 2>/dev/null || true
+                tableau &
+                local tableau_pid=$!
+                read -r -p "Appuyez sur Entrée pour revenir au menu..." _ </dev/tty
+                kill $tableau_pid 2>/dev/null
+                wait $tableau_pid 2>/dev/null
+                ;;
+            2) 
+                [ -f "$LOG" ] && dialog --title "Historique des événements" --textbox "$LOG" 15 70 || dialog --msgbox "Log introuvable" 5 30
+                ;;
+            3) 
+                bilan_texte=$(afficher_bilan_formate)
+                dialog --title "Bilan de la session" --msgbox "$bilan_texte" 15 50
+                ;;
+            4) grace ;;
+            5) return 0 ;;
+	    *) return 0 ;; # Gestion si l'utilisateur appuie sur Echap
+        esac
+    done
+}
+
+###############################################################################
+#                           PROGRAMME PRINCIPAL                                
+###############################################################################
+
+# 1. Initialisation
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]: LANCEMENT DE ContrAll" > "$LOG"
+echo "" >> "$LOG"
+
+# Configuration et Scan
+configuration
+preparation
+
+if [ ! -f "$LISTE" ]; then
+    log "ERREUR" "$LISTE introuvable"
+    exit 1
+fi
+
+envoyer_configuration
+nettoyer_surveillance
+> "$suspendus"
+initialiser_fichiers
+
+# 2. Lancement de la vérification en tâche de fond uniquement
+verification &
+verification_pid=$!
+
+
+# 3. Lancement de l'interface de pilotage
+# Le script les instructions
+log "INFO" "Début de la surveillance (${temps} min)"
+
+# On lance le menu de pilotage
+menu_gestion
+
+# 5. Fin de la surveillance (quand on quitte le menu ou la durée est écoulée)
+echo ""
+echo -e "${vert}Arrêt des processus en cours...${neutre}"
+
+kill $verification_pid 2>/dev/null
+wait $verification_pid 2>/dev/null
+
+# Affichage bilan final
+bilan_final=$(afficher_bilan_formate)
+dialog --title "Bilan Final" --msgbox "$bilan_final" 15 50
+
+log "ALERTE" "ContrAll arrêté"
+clear
+
+# Vérifier que root SSH fonctionne ampiana ao amin'ny fonction préparation()
+#if ssh -i "$key" -o ConnectTimeout=5 "root@$ip" "echo OK" 2>/dev/null; then
+#   log "Connexion root OK sur $ip"
+#else
+#   log "ATTENTION: Connexion root échouée sur $ip"
+#fi
