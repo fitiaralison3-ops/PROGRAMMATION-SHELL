@@ -589,7 +589,7 @@ preparation() {
 
             # --- 3 tentatives de mot de passe ---
             tentative=1
-            succes=false
+            succes=0
             while [ $tentative -le 3 ]; do
                 if [ $tentative -gt 1 ]; then
                     mdp=$(dialog --insecure --passwordbox \
@@ -597,20 +597,23 @@ preparation() {
                         10 50 \
                         3>&1 1>&2 2>&3)
                     # Si l'utilisateur annule, on sort
-                    [ -z "$mdp" ] && break
+                    [ -z "$mdp" ] && {
+    			log "AVERTISSEMENT" "Saisie annulée pour $user@$ip"
+    			continue
+		}
                 fi
 
                 if SSHPASS="$mdp" sshpass -e ssh-copy-id \
                     -o StrictHostKeyChecking=no \
                     -i "$cle" "$user@$ip" >/dev/null 2>&1
                 then
-                    succes=true
+                    succes=1
                     break
                 fi
                 ((tentative++))
             done
 
-            if $succes; then
+            if [ "$succes" -eq 1 ]; then
                 echo "$user:$ip" >> "$LISTE"
                 ((ok++))
                 log "INFO" "Clé envoyée à $user@$ip"
