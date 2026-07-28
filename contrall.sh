@@ -724,16 +724,21 @@ preparation() {
                 ssh -i "$key" $opt "$user@$ip" \
                     "[ -f /home/$user/.bashrc ] || touch /home/$user/.bashrc"
 
-                # Forcer l'écriture de bash_history en temps réel sur le slave
+								# Forcer l'écriture de bash_history en temps réel sur le slave
                 ssh -i "$key" $opt "$user@$ip" \
                     "grep -q 'PROMPT_COMMAND' ~/.bashrc || \
                     echo 'PROMPT_COMMAND=\"history -a; \$PROMPT_COMMAND\"' >> ~/.bashrc"
+
+                # Désactiver l'ignorance des doublons dans l'historique
+                ssh -i "$key" $opt "$user@$ip" \
+                    "grep -q 'HISTCONTROL' ~/.bashrc || echo 'HISTCONTROL=' >> ~/.bashrc;
+                     grep -q 'HISTIGNORE' ~/.bashrc  || echo 'HISTIGNORE='  >> ~/.bashrc"
                 log "INFO" "PROMPT_COMMAND configuré sur $user@$ip"
 
                 # Vider l'historique existant pour repartir de zéro
                 ssh -i "$key" $opt "$user@$ip" "> ~/.bash_history" 2>/dev/null
 
-                # Nettoyer la variable pour plus de sécurité
+                # Nettoyer la variable du mot de passe
                 unset mdp
             else
                 ((echec++))
