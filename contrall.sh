@@ -1125,19 +1125,25 @@ traiter_utilisateur()
     local user="$1"
     local ip="$2"
 
-    # Vérification et réservation HORS du sous-shell principal
-	( flock -n 200 || exit 0
-  		if grep -q "^$user:$ip:" "$suspendus"; then
-      			exit 0
-  		fi
-  		echo "$user:$ip:EN_COURS:EN_COURS:EN_COURS" >> "$suspendus"
-	) 200>"$suspendus.lock"
-    # Vérifier si la réservation a réussi
-    if ! grep -q "^$user:$ip:EN_COURS" "$suspendus" 2>/dev/null; then
-        return  # quelqu'un d'autre a déjà réservé
+    # Vérification rapide avant même d'essayer le verrou
+    if grep -q "^$user:$ip:" "$suspendus" 2>/dev/null; then
+        return
     fi
 
-    # Maintenant lancer le cycle en arrière-plan
+    # Réservation atomique avec flock non-bloquant
+    ( flock -n 200 || exit 0
+        if grep -q "^$user:$ip:" "$suspendus"; then
+            exit 0
+        fi
+        echo "$user:$ip:EN_COURS:EN_COURS:EN_COURS" >> "$suspendus"
+    ) 200>"$suspendus.lock"
+
+    # Vérifier si la réservation a réussi
+    if ! grep -q "^$user:$ip:EN_COURS" "$suspendus" 2>/dev/null; then
+        return
+    fi
+
+    # Lancer le cycle en arrière-plan
     (
         uid=$(ssh -i "$key" $opt "root@$ip" "id -u $user" 2>/dev/null)
         if [ -z "$uid" ]; then
