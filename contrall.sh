@@ -1110,7 +1110,10 @@ lever_suspension()
       "$HOME/.term_${user}_${ip}" \
       "$HOME/.last_line_${user}_${ip}" \
       "$HOME/.last_cmd_${user}_${ip}"
-      retour "$ip" "$user"
+    # Vider l'historique bash du slave pour repartir de zéro
+    ssh -i "$key" $opt "$user@$ip" "> ~/.bash_history" 2>/dev/null || true
+    retour "$ip" "$user"
+
     log "INFO" "SUSPENSION LEVEE $user:$ip"
     log_levee_session "$user" "$ip" "auto"
 }
@@ -1123,13 +1126,12 @@ traiter_utilisateur()
     local ip="$2"
 
     # Vérification et réservation HORS du sous-shell principal
-    ( flock 200
-      if grep -q "^$user:$ip:" "$suspendus"; then
-          exit 0
-      fi
-      echo "$user:$ip:EN_COURS:EN_COURS:EN_COURS" >> "$suspendus"
-    ) 200>"$suspendus.lock"
-
+	( flock -n 200 || exit 0
+  		if grep -q "^$user:$ip:" "$suspendus"; then
+      			exit 0
+  		fi
+  		echo "$user:$ip:EN_COURS:EN_COURS:EN_COURS" >> "$suspendus"
+	) 200>"$suspendus.lock"
     # Vérifier si la réservation a réussi
     if ! grep -q "^$user:$ip:EN_COURS" "$suspendus" 2>/dev/null; then
         return  # quelqu'un d'autre a déjà réservé
