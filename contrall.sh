@@ -528,18 +528,16 @@ configuration()
 }
 
 #Fonction 12: Injecter les alias pour bloquer les commandes interdites
-blocage()
-{
+blocage() {
     local user="$1"
     local ip="$2"
-    
-    # Sauvegarde de .bashrc avant injection des alias
-	ssh -i "$key" $opt "root@$ip" "
-    		[ -f /home/$user/.bashrc ] && cp /home/$user/.bashrc /home/$user/.bashrc.bak.\$(date +%Y%m%d_%H%M%S)
-	  " 2>/dev/null || true
+
+    ssh -i "$key" $opt "root@$ip" "
+        [ -f /home/$user/.bashrc ] && cp /home/$user/.bashrc /home/$user/.bashrc.bak.\$(date +%Y%m%d_%H%M%S)
+    " 2>/dev/null || true
 
     if [ ! -s "$CMD_BLACKLIST_LOCALE" ]; then
-        log "AVERTISSEMENT" "cmd_blacklist vide — aucun alias injecté sur $user@$ip"
+        log "AVERTISSEMENT" "cmd_blacklist vide"
         return
     fi
 
@@ -550,6 +548,8 @@ blocage()
     alias_block+="    echo '[ContrAll] Commande interdite !'\n"
     alias_block+="    echo 'Une infraction a été enregistrée.'\n"
     alias_block+="    echo ''\n"
+    # Écrire dans un fichier local sur le slave
+    alias_block+="    echo \"$ip|$user|CMD:\$0|\$(date '+%F %T')\" >> /tmp/contrall_alertes_${user}.txt 2>/dev/null\n"
     alias_block+="    return 1\n"
     alias_block+="}\n"
 
@@ -560,11 +560,12 @@ blocage()
 
     alias_block+="# ContrAll-fin\n"
 
-    ssh -i "$key" $opt "root@$ip" \
-        "sed -i '/# ContrAll-debut/,/# ContrAll-fin/d' /home/$user/.bashrc 2>/dev/null || true"
+    ssh -i "$key" $opt "root@$ip" "
+        sed -i '/# ContrAll-debut/,/# ContrAll-fin/d' /home/$user/.bashrc 2>/dev/null || true
+    " 2>/dev/null
 
-    printf "%b" "$alias_block" | ssh -i "$key" $opt "root@$ip" \
-        "cat >> /home/$user/.bashrc"
+    printf "%b" "$alias_block" | ssh -i "$key" $opt "root@$ip" "cat >> /home/$user/.bashrc"
+
     log "INFO" "Alias de blocage injectés sur $user@$ip"
 }
 
@@ -1252,6 +1253,26 @@ surveiller_clients()
         if grep -q "^$user:$ip:" "$suspendus" 2>/dev/null; then
             continue
         fi
+
+	# Récupérer les infractions écrites par les alias sur le slave
+if ssh -i "$key" $opt "root@$ip" "[ -f /tmp/contrall_alertes_${user}.txt ]" 2>/dev/null; then
+    local alias_infractions
+    alias_infractions=$(ssh -i "$key" $opt "root@$ip" "cat /tmp/contrall_alertes_${user}.txt" 2>/dev/null)
+    if [ -n "$alias_infractions" ]; then
+        # Compter les lignes
+        local nb_alias_infra=$(echo "$alias_infractions" | wc -l)
+        # Ajouter au fichier d'alertes du master
+        echo "$alias_infractions" >> "$FICHIER_ALERTES"
+        # Incrémenter le compteur de restrictions
+        mettre_a_jour_restriction "$user" "$ip" "$nb_alias_infra"
+        # Notifier l'utilisateur
+        notifier_client "$user" "$ip" "INFRACTION DÉTECTÉE" \
+            "Vous avez tenté d'utiliser une commande interdite. Infraction enregistrée."
+        log "INFO" "INFRACTION (alias) pour $user@$ip (+$nb_alias_infra)"
+        # Vider le fichier sur le slave pour ne pas le relire
+        ssh -i "$key" $opt "root@$ip" "> /tmp/contrall_alertes_${user}.txt" 2>/dev/null
+    fi
+fi
 
         local infractions=0
 
