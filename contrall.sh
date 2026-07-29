@@ -614,22 +614,28 @@ nettoyer_alias()
 }
 
 #Fonction 14: envoier les fichiers blacklist, cmd_blacklist et terminal_autorise vers chaque slave via SCP, puis affiche un bilan des réussites et échecs 
-envoyer_configuration() 
+envoyer_configuration()
 {
     local ok=0
     local echec=0
-    
+
     dialog --infobox "Envoi de la configuration vers les clients..." 5 50
     sleep 2
+
     while IFS=":" read -r user ip; do
         [ -z "$user" ] && continue
 
         if ssh -i "$key" $opt "root@$ip" "mkdir -p /home/$user" >/dev/null 2>&1; then
-            # Vérifier que TOUS les scp réussissent
-            if scp -i "$key" $opt "$BLACKLIST_LOCALE" "$user@$ip:/home/$user/blacklist.txt" >/dev/null 2>&1 && \
-               scp -i "$key" $opt "$CMD_BLACKLIST_LOCALE" "$user@$ip:/home/$user/cmd_blacklist.txt" >/dev/null 2>&1 && \
-               scp -i "$key" $opt "$TERMINAL_AUTORISE_LOCALE" "$user@$ip:/home/$user/terminal_autorise.txt" >/dev/null 2>&1; then
-                
+            if scp -i "$key" $opt "$BLACKLIST_LOCALE" "root@$ip:/home/$user/blacklist.txt" >/dev/null 2>&1 && \
+               scp -i "$key" $opt "$CMD_BLACKLIST_LOCALE" "root@$ip:/home/$user/cmd_blacklist.txt" >/dev/null 2>&1 && \
+               scp -i "$key" $opt "$TERMINAL_AUTORISE_LOCALE" "root@$ip:/home/$user/terminal_autorise.txt" >/dev/null 2>&1; then
+
+                # Donner les bons droits
+                ssh -i "$key" $opt "root@$ip" "
+                    chown $user:$user /home/$user/blacklist.txt /home/$user/cmd_blacklist.txt /home/$user/terminal_autorise.txt 2>/dev/null
+                    chmod 644 /home/$user/blacklist.txt /home/$user/cmd_blacklist.txt /home/$user/terminal_autorise.txt 2>/dev/null
+                " 2>/dev/null
+
                 log "INFO" "Configuration envoyée à $user@$ip"
                 blocage "$user" "$ip"
                 ((ok++))
@@ -638,12 +644,12 @@ envoyer_configuration()
                 ((echec++))
             fi
         else
-            log_error "ERREUR" "Impossible de créer /home/$user sur $user@$ip"
+            log_error "ERREUR" "Impossible de créer /home/$user sur $ip"
             ((echec++))
         fi
     done < "$LISTE"
 
-    dialog --msgbox "Configuration terminée.\nRéussites : $ok \nÉchecs    : $echec" 10 45
+    dialog --msgbox "Configuration terminée.\nRéussites : $ok \nÉchecs : $echec" 10 45
 }
 
 #Fonction 15: fonction qui scanne le réseau à la recherche des machines avec le port SSH ouvert, demande les identifiants pour chacune, 
@@ -879,17 +885,16 @@ surveiller_applications()
     touch "$cache"
 
     local apps_trouvees
-    apps_trouvees=$(ssh -i "$key" $opt "$user@$ip" "
+    apps_trouvees=$(ssh -i "$key" $opt "root@$ip" "
         [ -f $blacklist ] || exit 0
         while IFS= read -r app; do
             [ -z \"\$app\" ] && continue
-            if pgrep -u "$user" -f \"(^|/)\$app(\$| )\" >/dev/null 2>&1; then
-                pkill -u "$user" -f \"(^|/)\$app(\$| )\" 2>/dev/null || true
+            if pgrep -u '$user' -f \"\$app\" >/dev/null 2>&1; then
+                pkill -u '$user' -f \"\$app\" 2>/dev/null || true
                 echo \"\$app\"
             fi
         done < $blacklist
     " 2>/dev/null)
-
 
     while IFS= read -r app; do
         [ -z "$app" ] && continue
@@ -897,12 +902,12 @@ surveiller_applications()
             echo "$app" >> "$cache"
             infractions_locales=$((infractions_locales + 1))
             log "ALERTE" "APP INTERDITE: $user@$ip a lancé $app"
-    	    log_infraction_session "$user" "$ip" "APP" "$app"
+            log_infraction_session "$user" "$ip" "APP" "$app"
             echo "$ip|$user|APP:$app|$(date '+%F %T')" >> "$FICHIER_ALERTES"
         fi
     done <<< "$apps_trouvees"
 
-    # Nettoyer le cache pour les apps qui ne tournent plus
+    # Nettoyage du cache
     if [ -s "$cache" ]; then
         while IFS= read -r app_cache; do
             if ! echo "$apps_trouvees" | grep -qx "$app_cache"; then
