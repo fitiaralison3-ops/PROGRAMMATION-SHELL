@@ -229,6 +229,7 @@ debloquer_urgence()
         s=\$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u='$user' '\$3==u {print \$1; exit}')
         [ -n \"\$s\" ] && systemctl thaw \"session-\${s}.scope\" 2>/dev/null || true
         systemctl thaw user-\$(id -u '$user').slice 2>/dev/null || true
+        pkill -CONT -u '$user' 2>/dev/null || true
         uid_local=\$(id -u '$user' 2>/dev/null)
         if [ -n \"\$uid_local\" ]; then
             auditctl -d always,exit -F arch=b64 -S execve \
@@ -239,6 +240,12 @@ debloquer_urgence()
     " 2>/dev/null
 
     [ -n "$uid" ] && unblock_network "$ip" "$uid"
+
+    # Comme lever_suspension() : ré-active vraiment la session graphique et
+    # relance le display manager si besoin. Sans ce dernier appel, un
+    # utilisateur gelé via SIGSTOP + systemd freeze peut rester bloqué même
+    # après le passwd -u / thaw ci-dessus.
+    retour "$ip" "$user"
 
     echo "Déblocage terminé."
 }
@@ -1302,24 +1309,28 @@ surveiller_clients()
             continue
         fi
 
-	# Récupérer les infractions écrites par les alias sur le slave
-if ssh -i "$key" $opt "root@$ip" "[ -f /tmp/contrall_alertes_${user}.txt ]" 2>/dev/null; then
-    local alias_infractions
-    alias_infractions=$(ssh -i "$key" $opt "root@$ip" "cat /tmp/contrall_alertes_${user}.txt" 2>/dev/null)
-    if [ -n "$alias_infractions" ]; then
-        # Compter les lignes
-        local nb_alias_infra=$(echo "$alias_infractions" | wc -l)
-        # Ajouter au fichier d'alertes du master
-        echo "$alias_infractions" >> "$FICHIER_ALERTES"
-        # Incrémenter le compteur de restrictions
-        mettre_a_jour_restriction "$user" "$ip" "$nb_alias_infra"
-        # Notifier l'utilisateur
-        notifier_client "$user" "$ip" "INFRACTION DÉTECTÉE" \
-            "Vous avez tenté d'utiliser une commande interdite. Infraction enregistrée."
-        log "INFO" "INFRACTION (alias) pour $user@$ip (+$nb_alias_infra)"
-        # Vider le fichier sur le slave pour ne pas le relire
-        ssh -i "$key" $opt "root@$ip" "> /tmp/contrall_alertes_${user}.txt" 2>/dev/null
+	# Récupérer les infractions écrites par les alias sur le slave.
+	# mv+cat+rm en un seul appel SSH : on "réclame" le fichier avant de le
+	# lire, pour ne jamais relire (et recompter) le même contenu si un appel
+	# précédent de vidage a été retardé par le réseau.
+local alias_infractions
+alias_infractions=$(ssh -i "$key" $opt "root@$ip" "
+    f=/tmp/contrall_alertes_${user}.txt
+    if [ -s \"\$f\" ]; then
+        mv \"\$f\" \"\$f.claim.\$\$\" 2>/dev/null && cat \"\$f.claim.\$\$\" 2>/dev/null && rm -f \"\$f.claim.\$\$\" 2>/dev/null
     fi
+" 2>/dev/null)
+if [ -n "$alias_infractions" ]; then
+    # Compter les lignes
+    local nb_alias_infra=$(echo "$alias_infractions" | wc -l)
+    # Ajouter au fichier d'alertes du master
+    echo "$alias_infractions" >> "$FICHIER_ALERTES"
+    # Incrémenter le compteur de restrictions
+    mettre_a_jour_restriction "$user" "$ip" "$nb_alias_infra"
+    # Notifier l'utilisateur
+    notifier_client "$user" "$ip" "INFRACTION DÉTECTÉE" \
+        "Vous avez tenté d'utiliser une commande interdite. Infraction enregistrée."
+    log "INFO" "INFRACTION (alias) pour $user@$ip (+$nb_alias_infra)"
 fi
 
         local infractions=0
