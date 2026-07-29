@@ -110,6 +110,22 @@ numerique( )
 	    [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+# Fonction de validation d'un nom d'utilisateur (utilisée pour tout $user
+# provenant d'une source non fiable : reverse DNS, saisie manuelle, etc.)
+# Autorise lettres, chiffres, tiret, underscore, point (format Unix classique).
+utilisateur_valide()
+{
+    [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]
+}
+
+# Échappe une chaîne pour qu'elle puisse être utilisée sans risque à l'intérieur
+# d'une expression régulière basique (grep/sed) : échappe tous les
+# métacaractères regex, pas seulement '/' et '&'.
+echapper_regex()
+{
+    printf '%s' "$1" | sed 's/[][\.^$*/&]/\\&/g'
+}
+
 #########################################################################################
 #                                        FONCTIONS                                       
 #########################################################################################
@@ -199,8 +215,8 @@ debloquer_urgence()
 
     echo "Déblocage d'urgence pour $user@$ip ..."
 
-    # Échapper l'utilisateur pour sed
-    esc_user=$(printf '%s' "$user" | sed 's/[\/&]/\\&/g')
+    # Échapper l'utilisateur pour sed (échappement complet des métacaractères regex)
+    esc_user=$(echapper_regex "$user")
 
     local uid
     uid=$(ssh -i "$key" $opt "root@$ip" "id -u '$user'" 2>/dev/null)
@@ -213,6 +229,13 @@ debloquer_urgence()
         s=\$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u='$user' '\$3==u {print \$1; exit}')
         [ -n \"\$s\" ] && systemctl thaw \"session-\${s}.scope\" 2>/dev/null || true
         systemctl thaw user-\$(id -u '$user').slice 2>/dev/null || true
+        uid_local=\$(id -u '$user' 2>/dev/null)
+        if [ -n \"\$uid_local\" ]; then
+            auditctl -d always,exit -F arch=b64 -S execve \
+                -F uid=\$uid_local -k CONTRALL_CMD 2>/dev/null || true
+            auditctl -d always,exit -F arch=b32 -S execve \
+                -F uid=\$uid_local -k CONTRALL_CMD 2>/dev/null || true
+        fi
     " 2>/dev/null
 
     [ -n "$uid" ] && unblock_network "$ip" "$uid"
@@ -318,15 +341,18 @@ initialiser_fichiers()
 
 #Fonction 7: vide tous les fichiers de suivi (alertes, restrictions, suspendus, cooldown) et
 #supprime les caches d'applications et d'historique pour repartir de zéro à chaque lancement
-nettoyer_surveillance()
+nettoyer_surveillance() 
 {
     > "$FICHIER_ALERTES"
     > "$RESTRICTION_FILE"
     > "$COOLDOWN_FILE"
-    rm -f "$HOME/.apps_"*
-    rm -f "$HOME/.last_line_"* "$HOME/.last_cmd_"*
-    rm -f "$HOME/.term_"*
-    rm -f "$HOME/.audit_offset_"*
+    rm -f "$HOME/.apps_"* "$HOME/.last_line_"* "$HOME/.last_cmd_"* "$HOME/.term_"* "$HOME/.audit_offset_"*
+    
+    # Ajout : nettoyer les fichiers d'alertes sur chaque slave
+    while IFS=":" read -r user ip; do
+        ssh -i "$key" $opt "root@$ip" "rm -f /tmp/contrall_alertes_${user}.txt" 2>/dev/null
+    done < "$LISTE"
+    
     log "INFO" "Fichiers de surveillance nettoyés"
 }
 
@@ -651,6 +677,13 @@ preparation() {
                         hostname_full=""
                     fi
                     user=$(echo "$hostname_full" | cut -d'-' -f1)
+                    # Le reverse DNS n'est pas une source fiable (un tiers sur le
+                    # réseau peut le forger) : on rejette tout nom qui ne
+                    # ressemble pas à un identifiant Unix valide, pour éviter
+                    # une injection de commande plus tard sur les slaves.
+                    if [ -n "$user" ] && ! utilisateur_valide "$user"; then
+                        user=""
+                    fi
                     (
                         flock 200
                         echo "$user:$ip" >> "$tmpfile"
@@ -684,6 +717,12 @@ preparation() {
 
         if [ -z "$user" ]; then
             log "AVERTISSEMENT" "Utilisateur non fourni pour $ip, saut de la machine"
+            continue
+        fi
+
+        if ! utilisateur_valide "$user"; then
+            log_error "ERREUR" "Nom d'utilisateur invalide pour $ip ('$user'), saut de la machine"
+            dialog --msgbox "Nom d'utilisateur invalide pour $ip.\nCaractères autorisés : lettres, chiffres, '.', '_', '-'." 8 55
             continue
         fi
 
@@ -744,7 +783,7 @@ preparation() {
                         chmod 440 /etc/sudoers.d/contrall
                     '" < "$tmp_pass_sudo"
 
-                rm -f "$tmp_pass_sudo"
+                shred -u "$tmp_pass_sudo" 2>/dev/null || rm -f "$tmp_pass_sudo"
 
                 # --- Clé root : uniquement la clé publique ContrAll (jamais
                 #     le authorized_keys complet de l'utilisateur) ---
@@ -776,7 +815,7 @@ preparation() {
                     fi; \
                     systemctl reload ssh'" < "$tmp_pass"
 
-                rm -f "$tmp_pass"
+                shred -u "$tmp_pass" 2>/dev/null || rm -f "$tmp_pass"
                 log "INFO" "Clé root configurée sur $user@$ip (clé ContrAll uniquement)"
 
                 ssh -i "$key" $opt "$user@$ip" \
@@ -1043,6 +1082,7 @@ suspendre()
     local user="$1"
     local ip="$2"
     local uid="$3"
+    local debut fin
 
     if [ -z "$user" ] || [ -z "$ip" ] || [ -z "$uid" ]; then
         log_error "ERREUR" "Parametres manquants pour suspendre (user=$user, ip=$ip, uid=$uid)"
@@ -1068,7 +1108,7 @@ suspendre()
             pkill -STOP -u '$user' 2>/dev/null || true
         fi
         pkill -STOP -u '$user' 2>/dev/null || true
-    " 2>/dev/null
+    " >/dev/null 2>/dev/null
     then
         block_network "$ip" "$uid"
 
@@ -1080,6 +1120,11 @@ suspendre()
             flock 200
             sed -i "s/$user:$ip:.*/$user:$ip:$debut:$fin:${duree}m00s/" "$suspendus"
         ) 200>"$suspendus.lock"
+        # On retourne debut/fin explicitement (au lieu de compter sur la fuite
+        # de variables globales vers l'appelant), pour que traiter_utilisateur
+        # n'ait plus besoin de dépendre du fait que suspendre() tourne dans le
+        # même sous-shell.
+        echo "$debut:$fin"
         return 0
     else
         log_error "ERREUR" "Echec de la suspension pour $user@$ip"
@@ -1171,11 +1216,12 @@ lever_suspension()
     [ -n \"\$s\" ] && systemctl thaw \"session-\${s}.scope\" 2>/dev/null || true
     systemctl thaw user-$uid.slice 2>/dev/null || true
     pkill -CONT -u '$user' 2>/dev/null || true
-    auditctl -d always,exit -F arch=b64 -S execve \
-        -F uid=$uid -k CONTRALL_CMD 2>/dev/null || true
-    auditctl -d always,exit -F arch=b32 -S execve \
-        -F uid=$uid -k CONTRALL_CMD 2>/dev/null || true
 " >/dev/null 2>&1 || log_error "ERREUR" "Échec de la levée de suspension pour $user@$ip"
+    # NB: on ne retire PAS la règle auditctl ici. Elle doit rester active tant
+    # que ContrAll surveille cet utilisateur, sinon plus aucune commande n'est
+    # journalisée après la première suspension et surveiller_commandes()
+    # devient aveugle pour le reste de la session. Le retrait de la règle
+    # se fait uniquement dans debloquer_urgence()/à la fin de la session.
 
     unblock_network "$ip" "$uid"
 
@@ -1225,8 +1271,10 @@ traiter_utilisateur()
             exit 1
         fi
 
-        if suspendre "$user" "$ip" "$uid"; then
-            # debut/fin proviennent directement de suspendre() (pas de recalcul)
+        periode=$(suspendre "$user" "$ip" "$uid")
+        if [ $? -eq 0 ]; then
+            debut="${periode%%:*}"
+            fin="${periode##*:}"
             marquer_cooldown "$user" "$ip"
             if grep -q "^$user:$ip:" "$RESTRICTION_FILE"; then
                 sed -i "s|^$user:$ip:.*|$user:$ip:0|" "$RESTRICTION_FILE"
