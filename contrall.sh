@@ -971,8 +971,10 @@ surveiller_terminaux()
 
 #Fonction 18: lit les nouvelles lignes de l'historique bash du slave depuis la dernière vérification, 
 #les compare à la liste noire de commandes, et enregistre toute correspondance comme infraction dans les alertes
-surveiller_commandes() {
-    local user="$1" ip="$2"
+surveiller_commandes() 
+{
+    local user="$1"
+    local ip="$2"
     local infractions_locales=0
     local cache_position="$HOME/.audit_offset_${user}_${ip}"
 
@@ -1009,10 +1011,10 @@ surveiller_commandes() {
     # 7. Mettre à jour le cache avec la nouvelle taille
     echo "$taille_actuelle" > "$cache_position"
 
-    # 8. Filtrer les événements : conserver ceux avec notre clé et l'UID
+    # 8. Filtrer les événements : conserver ceux avec la clé et l'UID
     while IFS= read -r ligne; do
         if echo "$ligne" | grep -q "CONTRALL_CMD" && echo "$ligne" | grep -q "uid=$uid"; then
-            # Extraire la commande (a0) et tous les arguments de manière portable (sans grep -P)
+            # Extraire la commande (a0) et tous les arugments
             local commande
             commande=$(echo "$ligne" | grep -oE 'a0="[^"]*"' | sed 's/^a0="//; s/"$//')
             [ -z "$commande" ] && continue
@@ -1229,7 +1231,7 @@ lever_suspension()
     systemctl thaw user-$uid.slice 2>/dev/null || true
     pkill -CONT -u '$user' 2>/dev/null || true
 " >/dev/null 2>&1 || log_error "ERREUR" "Échec de la levée de suspension pour $user@$ip"
-    # NB: on ne retire PAS la règle auditctl ici. Elle doit rester active tant
+    # On ne retire PAS la règle auditctl ici. Elle doit rester active tant
     # que ContrAll surveille cet utilisateur, sinon plus aucune commande n'est
     # journalisée après la première suspension et surveiller_commandes()
     # devient aveugle pour le reste de la session. Le retrait de la règle
@@ -1314,10 +1316,6 @@ surveiller_clients()
             continue
         fi
 
-	# Récupérer les infractions écrites par les alias sur le slave.
-	# mv+cat+rm en un seul appel SSH : on "réclame" le fichier avant de le
-	# lire, pour ne jamais relire (et recompter) le même contenu si un appel
-	# précédent de vidage a été retardé par le réseau.
 local alias_infractions
 alias_infractions=$(ssh -i "$key" $opt "root@$ip" "
     f=/tmp/contrall_alertes_${user}.txt
@@ -1341,25 +1339,33 @@ fi
         local infractions=0
 
         # Surveiller les applications interdites
-        apps_infra=$(surveiller_applications "$user" "$ip" 2>/dev/null || echo 0)
-	      [[ "$apps_infra" =~ ^[0-9]+$ ]] || apps_infra=0
-        infractions=$((infractions + apps_infra))
+        apps_infra=$(surveiller_applications "$user" "$ip")
+	apps_infra=$(echo "$apps_infra" | tail -n1 | tr -d '[:space:]')
+	[[ "$apps_infra" =~ ^[0-9]+$ ]] || apps_infra=0
+	infractions=$((infractions + apps_infra))
 
         # Surveiller les terminaux non autorisés
-        term_infra=$(surveiller_terminaux "$user" "$ip" 2>/dev/null || echo 0)
-	      [[ "$term_infra" =~ ^[0-9]+$ ]] || term_infra=0
-        infractions=$((infractions + term_infra))
+        term_infra=$(surveiller_terminaux "$user" "$ip")
+	term_infra=$(echo "$term_infra" | tail -n1 | tr -d '[:space:]')
+
+	if ! [[ "$term_infra" =~ ^[0-9]+$ ]]; then
+    		term_infra=0
+	fi
+	infractions=$((infractions + term_infra))
 
         # Surveiller les commandes interdites
-        cmd_infra=$(surveiller_commandes "$user" "$ip" 2>/dev/null || echo 0)
-	      [[ "$cmd_infra" =~ ^[0-9]+$ ]] || cmd_infra=0
-        infractions=$((infractions + cmd_infra))
+	cmd_infra=$(surveiller_commandes "$user" "$ip")
+	cmd_infra=$(echo "$cmd_infra" | tail -n1 | tr -d '[:space:]')
+
+	if ! [[ "$cmd_infra" =~ ^[0-9]+$ ]]; then
+    		cmd_infra=0
+	fi
+	infractions=$((infractions + cmd_infra))
 
         # === CONSÉQUENCE IMMÉDIATE À CHAQUE INFRACTION ===
         if [ "$infractions" -gt 0 ]; then
             mettre_a_jour_restriction "$user" "$ip" "$infractions"
             
-            # CORRECTIF: notification GUI + wall (voir notifier_client)
             notifier_client "$user" "$ip" "INFRACTION DÉTECTÉE" \
                 "Vous avez violé les règles du système ContrAll. Continuez et vous serez suspendu !"
             
