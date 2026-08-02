@@ -1170,8 +1170,8 @@ suspendre()
 
         log "ALERTE" "SUSPENDU $user@$ip"
         log_suspension_session "$user" "$ip"
-        debut=$(date +'%H:%M:%S')
-        fin=$(date -d "+$duree minutes" +'%H:%M:%S')
+        debut=$(date +'%s')
+        fin=$(date -d "+$duree minutes" +'%s')
         (
             flock 200
             sed -i "s/$user:$ip:.*/$user:$ip:$debut:$fin:${duree}m00s/" "$suspendus"
@@ -1389,7 +1389,7 @@ entree_suspension_valide()
     fi
 
     local fin_epoch
-    fin_epoch=$(date -d "$champ4" +%s 2>/dev/null)
+    fin_epoch="$champ4"
     [ -n "$fin_epoch" ] || return 1
     [ $(( fin_epoch + 30 )) -gt "$(date +%s)" ]
 }
