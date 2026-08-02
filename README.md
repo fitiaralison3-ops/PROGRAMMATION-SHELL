@@ -1,350 +1,80 @@
-# 🔒 ContrAll - Système de Supervision de Réseau
-
-## Description
-
-**ContrAll** est un système de supervision et contrôle d'accès automatisé pour environnements réseau scolaires/entreprise. Il permet de monitorer en temps réel les utilisateurs sur plusieurs machines et d'appliquer des sanctions progressives en cas d'infraction.
-
-**Exemple d'usage :** Une école avec 50 machines et 200 utilisateurs. ContrAll détecte automatiquement les violations (lancement de Discord, Steam, torrents, etc.) et applique des sanctions progressives.
-
----
-
-## 🎯 Fonctionnalités principales
-
-### ✅ Phase 1 : Configuration
-- Menus interactifs pour choisir les paramètres
-- Durée de surveillance, seuil d'infractions, durée de suspension
-- Sélection des applications interdites (navigation, messagerie, jeux, etc.)
-- Sélection des commandes interdites (sudo, nmap, systemctl, etc.)
-- Choix du terminal autorisé
-
-### ✅ Phase 2 : Préparation du réseau
-- Scan automatique du réseau (détection des machines SSH)
-- Distribution SSH centralisée (ssh-copy-id)
-- Configuration sudo NOPASSWD restreint
-- Activation PermitRootLogin (clés seulement)
-- Setup historique bash en temps réel (PROMPT_COMMAND)
-
-### ✅ Phase 3 : Monitoring temps réel
-- Surveille les applications interdites en cours d'exécution
-- Détecte les terminaux non autorisés
-- Analyse l'historique bash pour les commandes interdites
-- Envoie des notifications desktop aux utilisateurs
-- Incrémente un compteur d'infractions
-
-### ✅ Phase 4 : Sanctions progressives (6 niveaux)
-Quand infractions >= seuil, application instantanée :
-1. **Notification** - Pop-up desktop + message wall
-2. **Verrouillage mot de passe** - `passwd -l`
-3. **Expiration du compte** - `usermod --expiredate 1`
-4. **Blocage cron/at** - Ajout à `/etc/cron.deny` et `/etc/at.deny`
-5. **Isolation réseau** - `iptables -j DROP`
-6. **Gel de la session** - `systemctl freeze`
-
-### ✅ Dashboard interactif
-- Tableau temps réel des suspensions avec countdown
-- Consultation des logs détaillés
-- Affichage du bilan global
-- Levée manuelle des suspensions
-- Arrêt propre de la surveillance
-
----
-
-## 📋 Prérequis
-
-### Dépendances système
-```bash
-bash 4+          # Bash récent (arrays associatifs)
-ssh              # OpenSSH client
-scp              # OpenSSH server copy
-sshpass          # SSH avec mots de passe
-dialog           # Interface utilisateur textuelle
-flock            # File locking
-netcat (nc)      # Network utilities
-awk, sed         # Text processing
-hostname, date   # System utilities
-```
-
-### Installation des dépendances (Debian/Ubuntu)
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-    openssh-client \
-    openssh-server \
-    sshpass \
-    dialog \
-    netcat-traditional \
-    gawk \
-    sed
-```
-
-### Prérequis réseau
-- **Master** (votre machine) : script contrall.sh
-- **Slaves** (machines surveillées) : SSH accessible, sudo disponible
-- Réseau fermé recommandé (lab/entreprise isolée)
-- Mots de passe simples pour l'initialisation
-
----
-
-## 🚀 Installation
-
-### 1. Cloner le repository
-```bash
-git clone https://github.com/fitiaralison3-ops/PROGRAMMATION-SHELL.git
-cd PROGRAMMATION-SHELL
-```
-
-### 2. Rendre le script exécutable
-```bash
-chmod +x contrall.sh
-```
-
-### 3. Vérifier les dépendances
-```bash
-bash -n contrall.sh  # Vérifier la syntaxe
-./contrall.sh --check-deps  # (optionnel) Vérifier les dépendances
-```
-
-### 4. Générer les clés SSH (si nécessaire)
-```bash
-ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_contrall
-# Les clés seront créées automatiquement au premier lancement
-```
-
----
-
-## 📖 Utilisation
-
-### Lancement basique
-```bash
-./contrall.sh
-```
-
-### Processus complet
-
-1. **Configuration** (2-3 min)
-   - Choisir durée de surveillance (ex: 10 minutes)
-   - Choisir seuil d'infractions (ex: 3)
-   - Choisir durée de suspension (ex: 1 minute)
-   - Sélectionner les catégories d'apps/commandes interdites
-   - Choisir le terminal autorisé
-
-2. **Préparation du réseau** (5-10 min)
-   - Scan des machines disponibles
-   - Entrée des identifiants SSH pour chaque machine
-   - Distribution des clés SSH
-   - Configuration de chaque slave
-
-3. **Surveillance active** (durée configurée)
-   - Dashboard temps réel
-   - Consultation des logs
-   - Levée manuelle de suspensions si besoin
-
-4. **Arrêt** (automatique ou manuel)
-   - Nettoyage complet
-   - Déblocage de tous les utilisateurs
-   - Sauvegarde des logs
-
----
-
-## 📁 Architecture des fichiers
-
-### Fichiers créés sur le master
-```
-~/.ssh/id_contrall        # Clé privée SSH
-~/.ssh/id_contrall.pub    # Clé publique SSH
-~/.apps_*                 # Caches d'applications
-~/.last_line_*            # Cache historique bash
-~/.last_cmd_*             # Cache commandes
-```
-
-### Fichiers de configuration
-```
-/etc/contrAll/user.txt                   # user:ip (machines configurées)
-/etc/contrAll/blacklist.txt              # Apps interdites
-/etc/contrAll/cmd_blacklist.txt          # Commandes interdites
-/etc/contrAll/terminal_autorise.txt      # Terminal autorisé
-```
-
-### Fichiers d'état
-```
-/etc/contrAll/alertes_actives.txt        # Infractions détectées
-/etc/contrAll/restriction.txt            # Compteur infractions (user:ip:count)
-/etc/contrAll/suspendus.txt              # Utilisateurs suspendus
-/etc/contrAll/contrall_cooldown.txt      # Cooldown post-levée
-```
-
-### Fichiers de logs
-```
-/var/log/contrall.log                    # Logs session courante
-/var/log/contrall_sessions.log           # Archive de toutes les sessions
-/var/log/contrall_errors.log             # Erreurs uniquement
-```
-
----
-
-## 🔧 Configuration avancée
-
-### Variables modifiables
-Dans le script, au début :
-
-```bash
-opt="-o BatchMode=yes -o ConnectTimeout=5 ..."  # Options SSH
-seuil=3          # Nombre d'infractions avant suspension
-duree=10         # Durée de suspension (minutes)
-temps=5          # Durée totale de surveillance (minutes)
-```
-
-### Customiser les catégories d'apps
-Modifier le tableau associatif `categorie` :
-```bash
-categorie["streaming"]="netflix youtube-dl plex kodi"
-```
-
-### Customiser les commandes interdites
-Modifier le tableau associatif `commande` :
-```bash
-commande["dangereuses"]="rm -rf dd shred"
-```
-
----
-
-## ⚠️ Limitations & Sécurité
-
-### Limitations (Contexte lab L1)
-- ✋ Pas d'authentification du master → utiliser en réseau contrôlé
-- ✋ Mots de passe en fichier temporaire → acceptables avec chmod 600
-- ✋ iptables non-persistant → perdus au reboot (normal en lab)
-- ✋ Réseau fermé recommandé → isolation obligatoire
-
-### Sécurité (Points forts pour L1)
-- ✅ SSH key-based (pas de mots de passe en clair)
-- ✅ sudo NOPASSWD restreint à 3 commandes
-- ✅ flock pour concurrence thread-safe
-- ✅ Validation des paramètres (UID numérique, etc.)
-- ✅ Nettoyage automatique via trap
-
-### Améliorations pour production (L2+)
-- 🔐 MFA/2FA sur accès root
-- 🔐 Vault pour secrets management
-- 🔐 Audit logs immuables (syslog distant)
-- 🔐 iptables-persistent
-- 🔐 Database centralisée (PostgreSQL)
-
----
-
-## 🐛 Troubleshooting
-
-### SSH indisponible pour une machine
-```
-[ERREUR]: SSH indisponible pour alice@192.1.1.5
-```
-**Solution :** Vérifier que la machine est en ligne et SSH est accessible
-```bash
-ssh -i ~/.ssh/id_contrall root@192.1.1.5 "echo OK"
-```
-
-### "Aucune machine configurée" après préparation
-```
-[ERREUR]: Aucune machine configurée (fichier /etc/contrAll/user.txt vide)
-```
-**Solution :** Relancer preparation(), vérifier le scan réseau
-
-### Utilisateur reste suspendu après la durée
-```
-T+60s : Suspension toujours active
-```
-**Solution :** Utiliser le menu "Lever suspension manuellement"
-
-### Logs manquants
-```
-[AVERTISSEMENT]: Log introuvable
-```
-**Solution :** Vérifier les permissions `/var/log/`
-```bash
-sudo ls -la /var/log/contrall*
-sudo touch /var/log/contrall.log
-sudo chmod 666 /var/log/contrall*
-```
-
----
-
-## 📊 Exemple de session
-
-### Configuration
-```
-Durée : 10 minutes
-Seuil : 3 infractions
-Suspension : 1 minute
-Apps interdites : Firefox, Discord, Steam
-Commandes interdites : sudo, nmap, wget
-Terminal autorisé : gnome-terminal
-```
-
-### Scan réseau
-```
-Scanning 192.168.1.0/24...
-✓ 192.168.1.5 : alice (machine detected)
-✓ 192.168.1.8 : bob (machine detected)
-✓ 192.168.1.12 : charlie (machine detected)
-```
-
-### Monitoring (Timeline)
-```
-14:22:15 - alice@192.1.1.5 lance Firefox → ALERTE (infraction 1/3)
-14:22:20 - alice@192.1.1.5 tape "sudo whoami" → ALERTE (infraction 2/3)
-14:22:25 - alice@192.1.1.5 ouvre xterm → ALERTE (infraction 3/3)
-14:22:25 - SUSPENSION alice@192.1.1.5 → 1m00s countdown
-14:22:30 - Mot de passe verrouillé, réseau bloqué, session gelée
-14:23:00 - bob@192.1.1.8 lance Discord → ALERTE (infraction 1/3)
-14:23:25 - alice@192.1.1.5 : 0m00s → Levée automatique ✅
-14:23:40 - bob@192.1.1.8 tape "nmap" → ALERTE (infraction 2/3)
-```
-
----
-
-## 📚 Fichiers connexes
-
-- `INSTALLATION.md` - Guide d'installation détaillé
-- `USAGE.md` - Guide d'utilisation complet
-- `ARCHITECTURE.md` - Détail technique de chaque fonction
-- `examples/` - Fichiers de logs d'exemple
-- `screenshots/` - Captures d'écran du dashboard
-
----
-
-## 🎓 Apprentissages clés
-
-Ce projet démontre:
-- **Bash avancé** : arrays, fonctions, redirection, subshells
-- **SSH** : key-based auth, distributio centralisée
-- **Linux** : sudo, usermod, passwd, iptables, systemctl, loginctl
-- **Concurrence** : flock, backgrounding, race conditions
-- **Logging** : audit trails, timestamps, multi-niveaux
-- **Architecture** : modularité, séparation des responsabilités
-- **UI/UX** : menus interactifs, tableaux temps réel
-
----
-
-## 📄 Licence
-
-MIT License - Libre d'utilisation
-
----
-
-## 👤 Auteur
-
-**fitiaralison3-ops**
-L1 Informatique - Semestre 1
-
----
-
-## ❓ Questions?
-
-Pour des questions ou signaler un bug :
-- Ouvrir une issue sur GitHub
-- Consulter les logs : `/var/log/contrall*`
-- Vérifier les dépendances : `bash -n contrall.sh`
-
----
-
-**Dernière mise à jour** : juillet 2024
+# ContrAll - Système de supervision et de contrôle réseau
+
+ContrAll est un script bash de supervision, destiné à un environnement type salle d'examen dans un cadre informatique. 
+Autrement dit, c'est un parc informatique administré. On y trouve donc un administrateur (souvant le surveillant ou l'enseignant), désigné master.
+Celui-ci prend le contrôle d'un ensemble de machines des utilisateurs surveillés, soient les slaves, en réseau local SSH.
+Le master surveille en temps réel l'activité des slaves (logiciels lancés, terminal utilisé, commandes tapées), et applique automatiquement des sanctions en cas d'infractions répétées.
+
+ContrAll donne au master les moyens de:
+- définir les restrictions et les règles de la session: logiciels interdits, commandes interdites, terminal autorisé ;
+- surveiller en temps réel chaque machine à distance
+- avertir l'utilisateur fautif en temps réel messages
+- sanctionner automatiquement en cas de récidive selon le nombre d'infractions (verrouillage du compte, coupure réseau, gel de session), avec une durée et une levée automatiques ;
+- contrôler tout cela à partir d'une interface interactif ('dialog'), avec logs, bilans et levée manuelle possible à tout moment.
+
+FONCTIONALITES:
+
+Le système repose sur une architecture Master-Slave. La machine MASTER exécute le script contrall.sh, qui fournit une interface de gestion basée sur dialog. Elle communique avec les machines SLAVE via une connexion SSH sécurisée utilisant une clé ed25519 et une configuration sudoers restreinte.
+
+Le fonctionnement du programme se déroule en plusieurs étapes successives.
+
+Tout d'abord, la fonction dependance() vérifie que tous les outils et paquets nécessaires au fonctionnement du système sont installés sur la machine du master. 
+
+Ensuite, la fonction configuration() permet à l'administrateur de définir les paramètres de surveillance à l'aide d'une interface interactive dialog. Il peut notamment configurer la durée de la surveillance, le seuil d'infractions autorisées ainsi que les catégories d'applications ou de commandes interdites.
+
+Une fois la configuration terminée, la fonction preparation() réalise automatiquement la préparation des machines distantes. Elle effectue un balayage du réseau afin de détecter les machines disponibles, met en place l'authentification SSH par clé, configure les règles sudoers nécessaires et installe la clé SSH du compte administrateur afin de permettre les interventions à distance sans saisie de mot de passe.
+
+La fonction envoyer_configuration() diffuse ensuite la configuration vers chaque machine esclave. Elle transmet les listes noires (blacklists) des applications et commandes interdites, puis injecte les alias Bash nécessaires afin de renforcer les mécanismes de contrôle des utilisateurs.
+
+Après cette phase d'initialisation, la fonction verification() est lancée en arrière-plan. 
+Elle exécute une boucle de surveillance toutes les deux secondes afin de contrôler en permanence l'activité des utilisateurs sur les machines distantes. 
+Cette surveillance comprend plusieurs opérations : la détection et l'arrêt des applications interdites grâce à surveiller_applications().
+La fermeture des terminaux non autorisés via surveiller_terminaux(). L
+e contrôle des commandes exécutées grâce à une partie de surveiller_clients()qui surveille /tmp/contrall_alertes_${user}.txt, où est écrit les infractions après l'injection de alias dans .bashrc; alias bloque l'exécution de la commande en affichant un message d'avertissement, or, c'est contournable via /usr/bin/... . 
+C'est pourquoi surveiller_commandes() analyse aussi les journaux du service auditd dans le fichier /var/log/audit/audit.log 
+ainsi que la mise à jour du compteur d'infractions de chaque utilisateur par mettre_a_jour_restriction(). Lorsque le nombre d'infractions atteint le seuil configuré, la fonction traiter_utilisateur() applique automatiquement la sanction prévue, notamment la suspension de l'utilisateur via suspendre().
+
+Parallèlement à cette surveillance automatique, la fonction menu_gestion() reste active au premier plan. Elle fournit à l'administrateur une interface de gestion permettant de consulter en temps réel l'état des utilisateurs surveillés, les journaux d'événements, les bilans de surveillance, de lever manuellement une suspension ou encore d'arrêter proprement le programme.
+
+##JOURNALISATION
+- /var/log/contrall_sessions.log: Log qui mémorise toutes les sessions
+- /var/log/contrall_errors.log: Log des erreurs de toutes les seesions 
+- /var/log/contrall.log: log à l'instant,qui journalise en détail chaque session, effacé à chaque nouveau lancement de contrall
+- /var/log/contrall_rapport_$(date '+%Y%m%d_%H%M%S').txt: rapport de chaque session, généré après chaque fermeture du script
+
+## INSTALLATION
+
+sudo apt install ./contrall.deb
+
+## DÉSINSTALLATION
+
+sudo apt remove contrall
+
+## EXECUTION
+ sudo contrall
+
+## PRÉ-REQUIS
+
+- Sur le master:
+'bash', 'dialog', 'ssh', 'scp', 'sshpass', 'nc', 'flock', 'awk', 'sed' 'host','hostname', 'date'.
+Le script vérifie leur présence au démarrage ( action effectuée par la fonction 'dependance') et refuse de se lancer si l'un d'eux est manquant.
+Le script doit aussi être lancé en mode root et refuse de se lancer dans le cas contraire
+- Sur chaque slave: 
+ Un serveur SSH actif et joignable sur le port 22.
+ Un compte utilisateur avec mot de passe connu par le master
+ Utilisateur appartenant au groupe 'sudo'.
+
+### Réseau
+
+Master et slaves doivent être sur le *même sous-réseau /24* (le scan de
+découverte balaie les 254 adresses de ce sous-réseau).
+
+## LIMITATIONS CONNUES
+
+- Le contournement de l'alias par chemin complet (`/usr/bin/sudo` au lieu de `sudo`), mais qui est  comblé par `auditd`, mais uniquement si ce dernier est actif.
+- La dépendance à une connexion internet au premier lancement pour installer `auditd` sur les slaves; sans ça, ce mécanisme de détection reste inopérant silencieusement.
+- Le blocage réseau (`nftables`/`iptables`) qui peut échouer selon la configuration du pare-feu du slave
+
+## AUTEUR
+
+RALISON Santatra Ny Aina Fitia — Étudiante en L1 Informatique, MIT Ankatso
