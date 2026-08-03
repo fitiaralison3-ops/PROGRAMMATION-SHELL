@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# c'est la derniere version
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "Ce script doit être exécuté en root." >&2
     exit 1
@@ -1048,7 +1050,7 @@ surveiller_commandes()
 
     # 6. Lire uniquement la partie nouvelle du fichier (depuis derniere_position)
     local nouvelles_donnees
-    nouvelles_donnees=$(ssh -i "$key" $opt "root@$ip" "tail -c +$((derniere_position+1)) /var/log/audit/audit.log" 2>>"$ERROR_LOG")
+    nouvelles_donnees=$(ssh -i "$key" $opt "root@$ip" "tail -c +$((derniere_position+1)) /var/log/audit/audit.log | sed 's/\x00//g'" 2>>"$ERROR_LOG")
 
     # 7. Mettre à jour le cache avec la nouvelle taille
     echo "$taille_actuelle" > "$cache_position"
